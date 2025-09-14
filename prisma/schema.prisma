@@ -1,0 +1,176 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                      String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email                   String    @unique
+  passwordHash            String    @map("password_hash")
+  firstName               String    @map("first_name")
+  lastName                String    @map("last_name")
+  role                    String    @default("user")
+  emailVerified           Boolean   @default(false) @map("email_verified")
+  emailVerificationToken  String?   @map("email_verification_token")
+  emailVerifiedAt         DateTime? @map("email_verified_at")
+  lastLoginAt             DateTime? @map("last_login_at")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  tenants     Tenant[]
+  auditLogs   AuditLog[]
+  uploadedFiles UploadedFile[]
+
+  @@index([email])
+  @@map("users")
+}
+
+model Tenant {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId            String    @unique @map("tenant_id")
+  ownerId             String    @map("owner_id") @db.Uuid
+  name                String
+  status              String    @default("pending")
+  domain              String
+  customDomain        String?   @map("custom_domain")
+  currentVersion      String?   @map("current_version")
+  buildArtifactPath   String?   @map("build_artifact_path")
+  description         String?
+  config              Json      @default("{}")
+  buildSettings       Json      @default("{}") @map("build_settings")
+  lastDeployedAt      DateTime? @map("last_deployed_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  owner         User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  builds        Build[]
+  deployments   Deployment[]
+  auditLogs     AuditLog[]
+
+  @@index([tenantId])
+  @@index([ownerId])
+  @@index([status])
+  @@index([domain])
+  @@map("tenants")
+}
+
+model Build {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String    @map("tenant_id")
+  version     String
+  status      String    @default("pending")
+  uploadPath  String?   @map("upload_path")
+  buildPath   String?   @map("build_path")
+  logsPath    String?   @map("logs_path")
+  errorMessage String?  @map("error_message")
+  buildConfig Json?     @map("build_config")
+  metadata    Json      @default("{}")
+  startedAt   DateTime? @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  tenant      Tenant       @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+  deployments Deployment[]
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([version])
+  @@index([tenantId, startedAt])
+  @@map("builds")
+}
+
+model Deployment {
+  id                        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                  String    @map("tenant_id")
+  version                   String
+  buildId                   String?   @map("build_id") @db.Uuid
+  status                    String    @default("active")
+  deployer                  String?
+  notes                     String?
+  deploymentConfig          Json?     @map("deployment_config")
+  cloudfrontInvalidationId  String?   @map("cloudfront_invalidation_id")
+  deployedAt                DateTime  @default(now()) @map("deployed_at")
+  createdAt                 DateTime  @default(now()) @map("created_at")
+  updatedAt                 DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  tenant  Tenant @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+  build   Build? @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([buildId])
+  @@index([tenantId, deployedAt])
+  @@map("deployments")
+}
+
+model AuditLog {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String?   @map("tenant_id")
+  userId       String?   @map("user_id") @db.Uuid
+  action       String
+  resourceType String?   @map("resource_type")
+  resourceId   String?   @map("resource_id")
+  details      Json      @default("{}")
+  ipAddress    String?   @map("ip_address")
+  userAgent    String?   @map("user_agent")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  // Relations
+  tenant Tenant? @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model UploadedFile {
+  id          String   @id @default(uuid())
+  fileName    String
+  filePath    String
+  fileSize    Int
+  mimeType    String
+  s3Key       String   @unique
+  s3Bucket    String
+  url         String
+  description String?
+  tags        String[]
+  isPublic    Boolean  @default(false)
+  metadata    Json?
+  
+  // Relationships
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId   String?
+  project     Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  
+  // Timestamps
+  uploadedAt  DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@map("uploaded_files")
+  @@index([userId])
+  @@index([projectId])
+  @@index([uploadedAt])
+  @@index([mimeType])
+}
+
+model Project {
+  // ... existing fields ...
+  uploadedFiles UploadedFile[]
+  // ... rest of existing fields ...
+}

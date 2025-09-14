@@ -1,0 +1,81 @@
+{
+  "name": "website-builder-backend",
+  "version": "1.0.0",
+  "description": "Multi-tenant website deployment backend",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js --watch src --ext js,json --delay 2",
+    "test": "jest --verbose",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:email": "node src/utils/emailDiagnostic.js",
+    "test:email-quick": "node -e \"require('./src/utils/emailDiagnostic').quickEmailTest()\"",
+    "test:db": "node src/utils/testConnection.js",
+    "test:api": "node -e \"console.log('API Test Commands:'); console.log('Health: Invoke-RestMethod -Uri http://localhost:8000/health -Method GET'); console.log('Email Config: Invoke-RestMethod -Uri http://localhost:8000/api/auth/test-email-config -Method GET');\"",
+    "db:generate": "npx prisma generate",
+    "db:push": "npx prisma db push",
+    "db:migrate": "npx prisma migrate dev",
+    "db:reset": "npx prisma migrate reset",
+    "db:studio": "npx prisma studio",
+    "lint": "eslint src --ext .js",
+    "lint:fix": "eslint src --ext .js --fix",
+    "format": "prettier --write \"src/**/*.{js,json,md}\"",
+    "prepare": "husky install",
+    "health": "node -e \"const http = require('http'); http.get('http://localhost:8000/health', res => { let data = ''; res.on('data', chunk => data += chunk); res.on('end', () => console.log(JSON.parse(data))); });\"",
+    "logs": "Get-Content logs/app.log -Wait -Tail 10",
+    "debug": "node --inspect=0.0.0.0:9229 src/server.js",
+    "build": "echo 'No build step required for Node.js backend'",
+    "postinstall": "npx prisma generate",
+    "setup:dev": "node -e \"console.log('Development Setup:'); console.log('1. npm install'); console.log('2. npm run db:generate'); console.log('3. npm run test:email'); console.log('4. npm run dev');\""
+  },
+  "keywords": [
+    "website-builder",
+    "deployment",
+    "multi-tenant",
+    "express",
+    "prisma",
+    "aws"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "@prisma/client": "^5.7.1",
+    "aws-sdk": "^2.1506.0",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "express-validator": "^7.0.1",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "nanoid": "^3.3.7",
+    "nodemailer": "^6.9.7",
+    "redis": "^4.6.11",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.8",
+    "eslint": "^8.54.0",
+    "husky": "^8.0.3",
+    "jest": "^29.7.0",
+    "lint-staged": "^15.1.0",
+    "nodemon": "^3.0.1",
+    "prettier": "^3.1.0",
+    "prisma": "^5.7.1",
+    "supertest": "^6.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "lint-staged": {
+    "src/**/*.{js,json,md}": [
+      "prettier --write",
+      "eslint --fix"
+    ]
+  }
+}
