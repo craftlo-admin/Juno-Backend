@@ -32,11 +32,31 @@ const createTenant = async (tx, userData) => {
     });
 
     // Validate inputs
+    logger.info('🔍 CreateTenant called with', {
+      hasTransaction: !!tx,
+      userData: userData,
+      userDataType: typeof userData,
+      userDataKeys: userData ? Object.keys(userData) : 'null',
+      hasUserId: !!userData?.id,
+      hasUserEmail: !!userData?.email
+    });
+
     if (!tx) {
       throw new Error('Transaction client is required for tenant creation');
     }
 
     if (!userData || !userData.id || !userData.email) {
+      logger.error('❌ CreateTenant validation failed', {
+        userDataExists: !!userData,
+        userDataType: typeof userData,
+        userDataValue: userData,
+        hasId: userData ? !!userData.id : false,
+        idValue: userData ? userData.id : 'N/A',
+        hasEmail: userData ? !!userData.email : false,
+        emailValue: userData ? userData.email : 'N/A',
+        userDataKeys: userData ? Object.keys(userData) : 'null',
+        userDataConstructor: userData ? userData.constructor.name : 'null'
+      });
       throw new Error('Valid user data with id and email is required');
     }
 

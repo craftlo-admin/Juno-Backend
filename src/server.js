@@ -141,7 +141,9 @@ app.use((req, res, next) => {
 
 // Import and mount route handlers with comprehensive error handling
 let authRoutes, tenantRoutes, uploadRoutes, projectRoutes;
+let analyticsRoutes, webhooksRoutes, realtimeRoutes, docsRoutes;
 
+// Core routes (critical)
 // Auth routes
 try {
   authRoutes = require('./routes/auth');
@@ -203,7 +205,7 @@ try {
   });
 }
 
-// Project routes - NEW: Added project routes
+// Project routes
 try {
   projectRoutes = require('./routes/projects');
   logger.info('✅ Project routes loaded successfully');
@@ -219,6 +221,67 @@ try {
       error: 'Project Service Unavailable',
       message: 'Project management temporarily unavailable.',
       details: process.env.NODE_ENV === 'development' ? projectError.message : 'Service unavailable'
+    });
+  });
+}
+
+// Advanced feature routes (non-critical, graceful degradation)
+// Analytics routes
+try {
+  analyticsRoutes = require('./routes/analytics');
+  logger.info('✅ Analytics routes loaded successfully');
+} catch (analyticsError) {
+  logger.warn('⚠️ Analytics routes failed to load (non-critical):', analyticsError.message);
+  analyticsRoutes = express.Router();
+  analyticsRoutes.use('*', (req, res) => {
+    res.status(503).json({
+      error: 'Analytics Service Unavailable',
+      message: 'Analytics features temporarily unavailable.'
+    });
+  });
+}
+
+// Webhooks routes
+try {
+  webhooksRoutes = require('./routes/webhooks');
+  logger.info('✅ Webhooks routes loaded successfully');
+} catch (webhooksError) {
+  logger.warn('⚠️ Webhooks routes failed to load (non-critical):', webhooksError.message);
+  webhooksRoutes = express.Router();
+  webhooksRoutes.use('*', (req, res) => {
+    res.status(503).json({
+      error: 'Webhooks Service Unavailable',
+      message: 'Webhook features temporarily unavailable.'
+    });
+  });
+}
+
+// Real-time/WebSocket routes
+try {
+  realtimeRoutes = require('./routes/realtime');
+  logger.info('✅ Real-time routes loaded successfully');
+} catch (realtimeError) {
+  logger.warn('⚠️ Real-time routes failed to load (non-critical):', realtimeError.message);
+  realtimeRoutes = express.Router();
+  realtimeRoutes.use('*', (req, res) => {
+    res.status(503).json({
+      error: 'Real-time Service Unavailable',
+      message: 'Real-time features temporarily unavailable.'
+    });
+  });
+}
+
+// Documentation routes
+try {
+  docsRoutes = require('./routes/docs');
+  logger.info('✅ Documentation routes loaded successfully');
+} catch (docsError) {
+  logger.warn('⚠️ Documentation routes failed to load (non-critical):', docsError.message);
+  docsRoutes = express.Router();
+  docsRoutes.use('*', (req, res) => {
+    res.status(503).json({
+      error: 'Documentation Service Unavailable',
+      message: 'API documentation temporarily unavailable.'
     });
   });
 }
@@ -359,13 +422,92 @@ if (process.env.NODE_ENV === 'development') {
       });
     }
   });
+
+  // Test registration page
+  app.get('/test', (req, res) => {
+    res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Registration</title>
+</head>
+<body>
+    <h1>Test Registration</h1>
+    <div id="result"></div>
+    
+    <script>
+        async function testRegistration() {
+            try {
+                console.log('Testing registration...');
+                
+                const response = await fetch('/api/auth/register', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        email: 'test@example.com',
+                        password: 'password123',
+                        firstName: 'Test',
+                        lastName: 'User'
+                    })
+                });
+                
+                console.log('Response status:', response.status);
+                const data = await response.text();
+                console.log('Response data:', data);
+                
+                document.getElementById('result').innerHTML = \`
+                    <h2>Registration Response</h2>
+                    <p>Status: \${response.status}</p>
+                    <p>Data: \${data}</p>
+                \`;
+                
+                if (response.ok) {
+                    // Try to get OTP from debug endpoint
+                    try {
+                        const otpResponse = await fetch('/api/auth/debug/otp');
+                        const otpData = await otpResponse.json();
+                        console.log('OTP Debug:', otpData);
+                        
+                        document.getElementById('result').innerHTML += \`
+                            <h3>OTP Debug Info</h3>
+                            <pre>\${JSON.stringify(otpData, null, 2)}</pre>
+                        \`;
+                    } catch (e) {
+                        console.log('No OTP debug endpoint');
+                    }
+                }
+                
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('result').innerHTML = \`
+                    <h2>Error</h2>
+                    <p>\${error.message}</p>
+                \`;
+            }
+        }
+        
+        // Test on load
+        testRegistration();
+    </script>
+</body>
+</html>
+    `);
+  });
 }
 
-// API Routes - FIXED: Use correct endpoint
+// API Routes - Core routes (essential for platform functionality)
 app.use('/api/auth', authRoutes);
 app.use('/api/tenants', tenantRoutes);
 app.use('/api/upload', uploadRoutes); // Fixed from '/api/uploads' to match route definitions
-app.use('/api/projects', projectRoutes); // NEW: Added project routes
+app.use('/api/projects', projectRoutes);
+
+// API Routes - Advanced features (with graceful degradation)
+app.use('/api/analytics', analyticsRoutes);
+app.use('/api/webhooks', webhooksRoutes);
+app.use('/api/realtime', realtimeRoutes);
+app.use('/api/docs', docsRoutes);
 
 // Catch-all route for undefined endpoints
 app.use('*', (req, res) => {
@@ -376,14 +518,25 @@ app.use('*', (req, res) => {
       'GET /health',
       'GET /debug/routes (dev only)',
       'GET /debug/email (dev only)',
+      '--- Core API Endpoints ---',
       'POST /api/auth/register',
       'POST /api/auth/login',
       'GET /api/auth/me',
       'POST /api/auth/send-otp',
       'POST /api/auth/verify-otp',
+      'GET /api/tenants',
+      'POST /api/tenants',
       'POST /api/upload/single',
       'POST /api/upload/multiple',
-      'GET /api/upload/files'
+      'GET /api/upload/files',
+      'POST /api/projects',
+      'GET /api/projects',
+      '--- Advanced Features ---',
+      'GET /api/analytics/dashboard',
+      'POST /api/webhooks',
+      'GET /api/realtime/stats',
+      'GET /api/docs/ui (Interactive API docs)',
+      'GET /api/docs/openapi.json'
     ],
     timestamp: new Date().toISOString()
   });
@@ -440,7 +593,8 @@ async function startServer() {
       console.log('\n📊 Service Status:');
       console.log(`🗃️ Database: ${dbStatus === 'connected' ? '✅ Connected' : '❌ ' + dbStatus}`);
       console.log(`📧 Email: ${emailStatus === 'configured' ? '✅ Configured' : '⚠️ Mock Mode'}`);
-      console.log(`📋 Routes: ✅ Loaded (auth, tenant, upload, project)`);
+      console.log(`📋 Routes: ✅ Loaded (auth, tenants, upload, projects, analytics, webhooks, realtime, docs)`);
+      console.log(`🎯 Features: ✅ Advanced routes mounted with graceful degradation`);
       
       if (dbStatus !== 'connected' || emailStatus === 'error') {
         console.log('\n🔧 Issues Detected:');

@@ -1,6 +1,8 @@
 const logger = require('../utils/logger');
 
 let redisClient = null;
+let isConnecting = false;
+let hasGivenUp = false; // Track if we've given up on Redis
 
 // Try to configure Redis
 try {
@@ -13,11 +15,13 @@ try {
       connectTimeout: 5000,
       commandTimeout: 5000,
       reconnectStrategy: (retries) => {
-        if (retries > 10) {
-          logger.error('Redis: Too many reconnection attempts, giving up');
-          return false;
+        if (retries > 3) { // Reduced from 5 to 3
+          logger.info('📦 Redis unavailable, switching to memory cache permanently');
+          hasGivenUp = true;
+          redisClient = null;
+          return false; // Stop reconnecting
         }
-        return Math.min(retries * 100, 3000);
+        return Math.min(retries * 1000, 3000);
       }
     },
     lazyConnect: true // Don't connect immediately
@@ -25,11 +29,16 @@ try {
 
   // Event handlers
   redisClient.on('error', (err) => {
-    logger.warn('Redis client error:', err.message);
+    // Only log errors if we haven't given up on Redis yet
+    if (!hasGivenUp) {
+      logger.debug('Redis connection issue:', err.message); // Changed to debug level
+    }
   });
 
   redisClient.on('connect', () => {
     logger.info('✅ Redis client connected');
+    isConnecting = false;
+    hasGivenUp = false; // Reset if we successfully connect
   });
 
   redisClient.on('ready', () => {
@@ -37,18 +46,42 @@ try {
   });
 
   redisClient.on('end', () => {
-    logger.info('Redis client disconnected');
+    if (!hasGivenUp) {
+      logger.debug('Redis client disconnected'); // Changed to debug level
+    }
   });
 
   redisClient.on('reconnecting', () => {
-    logger.info('Redis client reconnecting...');
+    if (!hasGivenUp) {
+      logger.debug('Redis client reconnecting...'); // Changed to debug level
+      isConnecting = true;
+    }
   });
 
-  // Try to connect
-  redisClient.connect().catch((error) => {
-    logger.warn('Redis connection failed, using memory cache fallback:', error.message);
-    redisClient = null;
-  });
+  // Try to connect with timeout
+  const connectWithTimeout = async () => {
+    if (hasGivenUp) return; // Don't even try if we've given up
+    
+    try {
+      isConnecting = true;
+      await Promise.race([
+        redisClient.connect(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Connection timeout')), 5000) // Reduced timeout
+        )
+      ]);
+    } catch (error) {
+      if (!hasGivenUp) {
+        logger.info('📦 Redis unavailable, using memory cache fallback');
+        hasGivenUp = true;
+      }
+      redisClient = null;
+      isConnecting = false;
+    }
+  };
+
+  // Don't block startup - connect in background
+  connectWithTimeout();
 
 } catch (error) {
   logger.warn('Redis not available, using in-memory cache fallback:', error.message);
@@ -142,18 +175,99 @@ class MemoryCache {
   }
 }
 
-// Export Redis client or fallback
-const cacheClient = redisClient || new MemoryCache();
+// Dynamic cache client that can switch between Redis and Memory cache
+class CacheClientWrapper {
+  constructor() {
+    this.memoryCache = new MemoryCache();
+  }
+
+  get activeClient() {
+    return (redisClient && !hasGivenUp) ? redisClient : this.memoryCache;
+  }
+
+  async get(key) {
+    try {
+      if (hasGivenUp || !redisClient) {
+        return await this.memoryCache.get(key);
+      }
+      return await this.activeClient.get(key);
+    } catch (error) {
+      // Silent fallback to memory cache
+      return await this.memoryCache.get(key);
+    }
+  }
+
+  async set(key, value, options = {}) {
+    try {
+      if (hasGivenUp || !redisClient) {
+        return await this.memoryCache.set(key, value, options);
+      }
+      return await this.activeClient.set(key, value, options);
+    } catch (error) {
+      // Silent fallback to memory cache
+      return await this.memoryCache.set(key, value, options);
+    }
+  }
+
+  async del(keys) {
+    try {
+      if (hasGivenUp || !redisClient) {
+        return await this.memoryCache.del(keys);
+      }
+      return await this.activeClient.del(keys);
+    } catch (error) {
+      // Silent fallback to memory cache
+      return await this.memoryCache.del(keys);
+    }
+  }
+
+  async ping() {
+    try {
+      if (!hasGivenUp && redisClient) {
+        return await redisClient.ping();
+      } else {
+        return await this.memoryCache.ping();
+      }
+    } catch (error) {
+      return await this.memoryCache.ping();
+    }
+  }
+
+  async disconnect() {
+    try {
+      if (redisClient && typeof redisClient.disconnect === 'function') {
+        await redisClient.disconnect();
+      }
+    } catch (error) {
+      logger.debug('Error disconnecting Redis:', error.message);
+    }
+    
+    try {
+      await this.memoryCache.disconnect();
+    } catch (error) {
+      logger.debug('Error disconnecting memory cache:', error.message);
+    }
+  }
+
+  getStats() {
+    if (this.activeClient === redisClient) {
+      return { type: 'redis', connected: true };
+    } else {
+      return { type: 'memory', ...this.memoryCache.getStats() };
+    }
+  }
+}
+
+// Export dynamic cache client
+const cacheClient = new CacheClientWrapper();
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-  if (cacheClient && typeof cacheClient.disconnect === 'function') {
-    try {
-      await cacheClient.disconnect();
-      logger.info('Cache client disconnected gracefully');
-    } catch (error) {
-      logger.error('Error disconnecting cache client:', error);
-    }
+  try {
+    await cacheClient.disconnect();
+    logger.info('Cache client disconnected gracefully');
+  } catch (error) {
+    logger.error('Error disconnecting cache client:', error);
   }
 });
 

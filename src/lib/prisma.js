@@ -8,7 +8,7 @@ const logger = require('../utils/logger');
  */
 
 // Global Prisma instance with enhanced configuration
-let prisma;
+let prisma = null;
 
 /**
  * Creates and configures Prisma client with robust connection handling
@@ -98,6 +98,16 @@ function createPrismaClient() {
 }
 
 /**
+ * Get Prisma client instance (lazy initialization)
+ */
+function getPrismaClient() {
+  if (!prisma) {
+    throw new Error('Prisma client not initialized. Please check database configuration.');
+  }
+  return prisma;
+}
+
+/**
  * Database connection health check with retry logic
  */
 async function checkDatabaseConnection(retries = 3, delay = 1000) {
@@ -105,7 +115,7 @@ async function checkDatabaseConnection(retries = 3, delay = 1000) {
     try {
       logger.info(`🔍 Database connection check (attempt ${attempt}/${retries})`);
       
-      await prisma.$queryRaw`SELECT 1 as health_check`;
+      await getPrismaClient().$queryRaw`SELECT 1 as health_check`;
       
       logger.info('✅ Database connection healthy');
       return { healthy: true, attempt };
@@ -162,7 +172,9 @@ async function executeWithRetry(operation, maxRetries = 3) {
         
         // Force disconnect and let Prisma reconnect
         try {
-          await prisma.$disconnect();
+          if (prisma) {
+            await prisma.$disconnect();
+          }
         } catch (disconnectError) {
           // Ignore disconnect errors
         }
@@ -183,8 +195,10 @@ async function gracefulShutdown() {
   logger.info('🛑 Initiating graceful database shutdown...');
   
   try {
-    await prisma.$disconnect();
-    logger.info('✅ Database connections closed successfully');
+    if (prisma) {
+      await prisma.$disconnect();
+      logger.info('✅ Database connections closed successfully');
+    }
   } catch (error) {
     logger.error('❌ Error during database shutdown:', error);
   }
@@ -211,7 +225,9 @@ process.on('SIGTERM', gracefulShutdown);
 process.on('beforeExit', gracefulShutdown);
 
 module.exports = {
-  prisma,
+  get prisma() {
+    return getPrismaClient();
+  },
   checkDatabaseConnection,
   executeWithRetry,
   gracefulShutdown

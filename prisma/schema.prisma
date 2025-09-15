@@ -1,6 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -11,50 +8,47 @@ datasource db {
 }
 
 model User {
-  id                      String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  email                   String    @unique
-  passwordHash            String    @map("password_hash")
-  firstName               String    @map("first_name")
-  lastName                String    @map("last_name")
-  role                    String    @default("user")
-  emailVerified           Boolean   @default(false) @map("email_verified")
-  emailVerificationToken  String?   @map("email_verification_token")
-  emailVerifiedAt         DateTime? @map("email_verified_at")
-  lastLoginAt             DateTime? @map("last_login_at")
-  createdAt               DateTime  @default(now()) @map("created_at")
-  updatedAt               DateTime  @updatedAt @map("updated_at")
-
-  // Relations
-  tenants     Tenant[]
-  auditLogs   AuditLog[]
-  uploadedFiles UploadedFile[]
+  id                     String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email                  String         @unique
+  passwordHash           String         @map("password_hash")
+  firstName              String         @map("first_name")
+  lastName               String         @map("last_name")
+  role                   String         @default("user")
+  emailVerified          Boolean        @default(false) @map("email_verified")
+  emailVerificationToken String?        @map("email_verification_token")
+  emailVerifiedAt        DateTime?      @map("email_verified_at")
+  lastLoginAt            DateTime?      @map("last_login_at")
+  createdAt              DateTime       @default(now()) @map("created_at")
+  updatedAt              DateTime       @updatedAt @map("updated_at")
+  auditLogs              AuditLog[]
+  tenants                Tenant[]
+  uploadedFiles          UploadedFile[]
 
   @@index([email])
   @@map("users")
 }
 
 model Tenant {
-  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId            String    @unique @map("tenant_id")
-  ownerId             String    @map("owner_id") @db.Uuid
-  name                String
-  status              String    @default("pending")
-  domain              String
-  customDomain        String?   @map("custom_domain")
-  currentVersion      String?   @map("current_version")
-  buildArtifactPath   String?   @map("build_artifact_path")
-  description         String?
-  config              Json      @default("{}")
-  buildSettings       Json      @default("{}") @map("build_settings")
-  lastDeployedAt      DateTime? @map("last_deployed_at")
-  createdAt           DateTime  @default(now()) @map("created_at")
-  updatedAt           DateTime  @updatedAt @map("updated_at")
-
-  // Relations
-  owner         User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  builds        Build[]
-  deployments   Deployment[]
-  auditLogs     AuditLog[]
+  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String       @unique @map("tenant_id")
+  ownerId           String       @map("owner_id") @db.Uuid
+  name              String
+  status            String       @default("pending")
+  domain            String
+  customDomain      String?      @map("custom_domain")
+  currentVersion    String?      @map("current_version")
+  buildArtifactPath String?      @map("build_artifact_path")
+  description       String?
+  config            Json         @default("{}")
+  buildSettings     Json         @default("{}") @map("build_settings")
+  lastDeployedAt    DateTime?    @map("last_deployed_at")
+  createdAt         DateTime     @default(now()) @map("created_at")
+  updatedAt         DateTime     @updatedAt @map("updated_at")
+  auditLogs         AuditLog[]
+  builds            Build[]
+  deployments       Deployment[]
+  projects          Project[]
+  owner             User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
   @@index([ownerId])
@@ -64,26 +58,27 @@ model Tenant {
 }
 
 model Build {
-  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId    String    @map("tenant_id")
-  version     String
-  status      String    @default("pending")
-  uploadPath  String?   @map("upload_path")
-  buildPath   String?   @map("build_path")
-  logsPath    String?   @map("logs_path")
-  errorMessage String?  @map("error_message")
-  buildConfig Json?     @map("build_config")
-  metadata    Json      @default("{}")
-  startedAt   DateTime? @map("started_at")
-  finishedAt  DateTime? @map("finished_at")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
-
-  // Relations
-  tenant      Tenant       @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
-  deployments Deployment[]
+  id           String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String       @map("tenant_id")
+  version      String
+  status       String       @default("pending")
+  uploadPath   String?      @map("upload_path")
+  buildPath    String?      @map("build_path")
+  logsPath     String?      @map("logs_path")
+  errorMessage String?      @map("error_message")
+  buildConfig  Json?        @map("build_config")
+  metadata     Json         @default("{}")
+  startedAt    DateTime?    @map("started_at")
+  finishedAt   DateTime?    @map("finished_at")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+  projectId    String?      @map("project_id") @db.Uuid
+  project      Project?     @relation(fields: [projectId], references: [id])
+  tenant       Tenant       @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+  deployments  Deployment[]
 
   @@index([tenantId])
+  @@index([projectId])
   @@index([status])
   @@index([version])
   @@index([tenantId, startedAt])
@@ -91,24 +86,25 @@ model Build {
 }
 
 model Deployment {
-  id                        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId                  String    @map("tenant_id")
-  version                   String
-  buildId                   String?   @map("build_id") @db.Uuid
-  status                    String    @default("active")
-  deployer                  String?
-  notes                     String?
-  deploymentConfig          Json?     @map("deployment_config")
-  cloudfrontInvalidationId  String?   @map("cloudfront_invalidation_id")
-  deployedAt                DateTime  @default(now()) @map("deployed_at")
-  createdAt                 DateTime  @default(now()) @map("created_at")
-  updatedAt                 DateTime  @updatedAt @map("updated_at")
-
-  // Relations
-  tenant  Tenant @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
-  build   Build? @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  id                       String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                 String   @map("tenant_id")
+  version                  String
+  buildId                  String?  @map("build_id") @db.Uuid
+  status                   String   @default("active")
+  deployer                 String?
+  notes                    String?
+  deploymentConfig         Json?    @map("deployment_config")
+  cloudfrontInvalidationId String?  @map("cloudfront_invalidation_id")
+  deployedAt               DateTime @default(now()) @map("deployed_at")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+  projectId                String?  @map("project_id") @db.Uuid
+  build                    Build?   @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  project                  Project? @relation(fields: [projectId], references: [id])
+  tenant                   Tenant   @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
 
   @@index([tenantId])
+  @@index([projectId])
   @@index([status])
   @@index([buildId])
   @@index([tenantId, deployedAt])
@@ -116,20 +112,18 @@ model Deployment {
 }
 
 model AuditLog {
-  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId     String?   @map("tenant_id")
-  userId       String?   @map("user_id") @db.Uuid
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String?  @map("tenant_id")
+  userId       String?  @map("user_id") @db.Uuid
   action       String
-  resourceType String?   @map("resource_type")
-  resourceId   String?   @map("resource_id")
-  details      Json      @default("{}")
-  ipAddress    String?   @map("ip_address")
-  userAgent    String?   @map("user_agent")
-  createdAt    DateTime  @default(now()) @map("created_at")
-
-  // Relations
-  tenant Tenant? @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
-  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  resourceType String?  @map("resource_type")
+  resourceId   String?  @map("resource_id")
+  details      Json     @default("{}")
+  ipAddress    String?  @map("ip_address")
+  userAgent    String?  @map("user_agent")
+  createdAt    DateTime @default(now()) @map("created_at")
+  tenant       Tenant?  @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+  user         User?    @relation(fields: [userId], references: [id])
 
   @@index([tenantId])
   @@index([userId])
@@ -139,7 +133,7 @@ model AuditLog {
 }
 
 model UploadedFile {
-  id          String   @id @default(uuid())
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   fileName    String
   filePath    String
   fileSize    Int
@@ -151,26 +145,35 @@ model UploadedFile {
   tags        String[]
   isPublic    Boolean  @default(false)
   metadata    Json?
-  
-  // Relationships
-  userId      String
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  projectId   String?
-  project     Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  
-  // Timestamps
+  userId      String   @db.Uuid
+  projectId   String?  @db.Uuid
   uploadedAt  DateTime @default(now())
   updatedAt   DateTime @updatedAt
-  
-  @@map("uploaded_files")
+  project     Project? @relation(fields: [projectId], references: [id])
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@index([userId])
   @@index([projectId])
   @@index([uploadedAt])
   @@index([mimeType])
+  @@map("uploaded_files")
 }
 
 model Project {
-  // ... existing fields ...
+  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name          String
+  description   String?
+  settings      Json           @default("{}")
+  tenantId      String         @map("tenant_id")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  builds        Build[]
+  deployments   Deployment[]
+  tenant        Tenant         @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
   uploadedFiles UploadedFile[]
-  // ... rest of existing fields ...
+
+  @@index([tenantId])
+  @@index([name])
+  @@index([tenantId, createdAt])
+  @@map("projects")
 }

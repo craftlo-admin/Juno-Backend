@@ -1,17 +1,18 @@
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const logger = require('../utils/logger');
+const { generateToken } = require('../utils/jwt');
+const { generateOTP } = require('../utils/otp');
 const { sendOTPEmail } = require('../services/emailService');
 const { createTenant } = require('../services/tenantService');
 
 /**
- * Multi-tenant Website Builder - Auth Controller (Enhanced with JWT Session Management)
- * Following project architecture: Express.js MVC, comprehensive error handling, production-ready
- * Enhanced with robust JWT token management for registration and login flows
+ * Multi-tenant Website Builder - Auth Controller (Clean Refactored)
+ * Following project architecture: Express.js MVC, clean separation of concerns
+ * Uses utility modules for JWT and OTP generation
  */
 
-// Import enhanced Prisma client with connection resilience
+// Import enhanced Prisma client
 let prisma, executeWithRetry;
 try {
   const dbModule = require('../lib/prisma');
@@ -22,29 +23,8 @@ try {
   logger.error('❌ Failed to import enhanced Prisma client in AuthController:', error);
 }
 
-// Import Redis client with memory fallback
-let redisClient;
-try {
-  redisClient = require('../config/redis');
-} catch (error) {
-  logger.warn('Redis not available, using memory cache fallback.');
-  const memoryCache = new Map();
-  redisClient = {
-    get: (key) => Promise.resolve(memoryCache.get(key) || null),
-    set: (key, value, options) => {
-      memoryCache.set(key, value);
-      if (options?.EX) {
-        setTimeout(() => memoryCache.delete(key), options.EX * 1000);
-      }
-      return Promise.resolve('OK');
-    },
-    del: (keys) => {
-      const keysToDelete = Array.isArray(keys) ? keys : [keys];
-      keysToDelete.forEach(key => memoryCache.delete(key));
-      return Promise.resolve(keysToDelete.length);
-    }
-  };
-}
+// Simple in-memory OTP storage (use Redis in production)
+const otpStore = new Map();
 
 class AuthController {
   // Validation middleware
@@ -69,828 +49,417 @@ class AuthController {
   ];
 
   /**
-   * Enhanced JWT token management utilities
+   * Register new user
    */
-  static generateJWT(payload, options = {}) {
+  static async register(req, res) {
     try {
-      const secret = process.env.JWT_SECRET;
-      if (!secret) {
-        throw new Error('JWT_SECRET is not configured');
-      }
-
-      const defaultOptions = {
-        expiresIn: process.env.JWT_EXPIRES_IN || '7d',
-        issuer: process.env.JWT_ISSUER || 'website-builder',
-        audience: process.env.JWT_AUDIENCE || 'website-builder-users'
-      };
-
-      const jwtOptions = { ...defaultOptions, ...options };
-      
-      // Add standard claims
-      const enhancedPayload = {
-        ...payload,
-        iat: Math.floor(Date.now() / 1000),
-        jti: `${payload.userId}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}` // Unique token ID
-      };
-
-      return jwt.sign(enhancedPayload, secret, jwtOptions);
-    } catch (error) {
-      logger.error('❌ JWT generation failed:', error);
-      throw new Error('Token generation failed');
-    }
-  }
-
-  static async saveJWTSession(userId, token, deviceInfo = {}) {
-    try {
-      const sessionData = {
-        userId,
-        token,
-        deviceInfo: {
-          userAgent: deviceInfo.userAgent || 'Unknown',
-          ip: deviceInfo.ip || 'Unknown',
-          platform: deviceInfo.platform || 'Unknown'
-        },
-        createdAt: new Date().toISOString(),
-        lastUsed: new Date().toISOString(),
-        isActive: true
-      };
-
-      // Save session in Redis with expiration matching JWT
-      const sessionKey = `session:${userId}:${Date.now()}`;
-      const expirationSeconds = 7 * 24 * 60 * 60; // 7 days in seconds
-      
-      await redisClient.set(sessionKey, JSON.stringify(sessionData), { EX: expirationSeconds });
-
-      // Maintain user session list (for multi-device support)
-      const userSessionsKey = `user_sessions:${userId}`;
-      const existingSessions = await redisClient.get(userSessionsKey);
-      const sessions = existingSessions ? JSON.parse(existingSessions) : [];
-      
-      sessions.push({
-        sessionKey,
-        deviceInfo: sessionData.deviceInfo,
-        createdAt: sessionData.createdAt
-      });
-
-      // Keep only last 5 sessions per user
-      if (sessions.length > 5) {
-        const oldSession = sessions.shift();
-        await redisClient.del(oldSession.sessionKey);
-      }
-
-      await redisClient.set(userSessionsKey, JSON.stringify(sessions), { EX: expirationSeconds });
-
-      logger.info('✅ JWT session saved successfully', { 
-        userId, 
-        sessionKey,
-        deviceInfo: sessionData.deviceInfo 
-      });
-
-      return sessionKey;
-    } catch (error) {
-      logger.error('❌ Failed to save JWT session:', error);
-      throw new Error('Session management failed');
-    }
-  }
-
-  static async validateAndRestoreJWT(token) {
-    try {
-      const secret = process.env.JWT_SECRET;
-      if (!secret) {
-        throw new Error('JWT_SECRET is not configured');
-      }
-
-      // Verify and decode token
-      const decoded = jwt.verify(token, secret);
-      
-      // Check if session exists in Redis
-      const userSessionsKey = `user_sessions:${decoded.userId}`;
-      const sessionsData = await redisClient.get(userSessionsKey);
-      
-      if (!sessionsData) {
-        throw new Error('Session not found');
-      }
-
-      const sessions = JSON.parse(sessionsData);
-      const activeSession = sessions.find(session => {
-        // This is a simplified check - in production you'd want to match exact tokens
-        return session.sessionKey.includes(decoded.userId);
-      });
-
-      if (!activeSession) {
-        throw new Error('Session not active');
-      }
-
-      // Update last used timestamp
-      const sessionData = await redisClient.get(activeSession.sessionKey);
-      if (sessionData) {
-        const session = JSON.parse(sessionData);
-        session.lastUsed = new Date().toISOString();
-        await redisClient.set(activeSession.sessionKey, JSON.stringify(session), { EX: 7 * 24 * 60 * 60 });
-      }
-
-      logger.info('✅ JWT session validated and restored', { 
-        userId: decoded.userId,
-        sessionKey: activeSession.sessionKey 
-      });
-
-      return decoded;
-    } catch (error) {
-      logger.error('❌ JWT validation/restoration failed:', error);
-      throw new Error('Invalid or expired session');
-    }
-  }
-
-  /**
-   * Enhanced database operation wrapper with connection error handling
-   */
-  static async executeDatabaseOperation(operation, operationName = 'Database operation') {
-    try {
-      if (!prisma) {
-        throw new Error('Database client not available');
-      }
-
-      if (executeWithRetry) {
-        return await executeWithRetry(operation);
-      } else {
-        return await operation();
-      }
-    } catch (error) {
-      logger.error(`❌ ${operationName} failed:`, {
-        error: error.message,
-        code: error.code,
-        meta: error.meta
-      });
-
-      // Handle specific database errors
-      if (error.message.includes('connection was forcibly closed') ||
-          error.message.includes('ConnectionReset') ||
-          error.code === 'P1001' || error.code === 'P1017') {
-        throw new Error('Database connection issue. Please try again in a moment.');
-      } else if (error.code === 'P2002') {
-        throw new Error('A record with this information already exists.');
-      } else if (error.code === 'P2025') {
-        throw new Error('Record not found.');
-      }
-
-      throw error;
-    }
-  }
-
-  /**
-   * STANDALONE OTP SENDING METHOD (Enhanced)
-   * Sends OTP without requiring full registration data with connection resilience
-   */
-  static async sendOTP(req, res, next) {
-    try {
-      const { email, type } = req.body;
-      
-      logger.info('📧 Standalone OTP generation', { email, type });
-
-      // Email validation
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(email)) {
-        return res.status(400).json({
-          error: 'Invalid Email',
-          message: 'Please provide a valid email address'
-        });
-      }
-
-      // Type-specific logic with enhanced database operations
-      if (type === 'registration') {
-        // Check if user already exists with retry logic
-        const existingUser = await AuthController.executeDatabaseOperation(
-          () => prisma.user.findUnique({ where: { email } }),
-          'Check existing user for registration'
-        );
-
-        if (existingUser) {
-          return res.status(409).json({
-            error: 'User Already Exists',
-            message: 'An account with this email address already exists',
-            suggestion: 'Use login instead of registration'
-          });
-        }
-      } else if (type === 'password_reset') {
-        // For password reset, user must exist
-        const existingUser = await AuthController.executeDatabaseOperation(
-          () => prisma.user.findUnique({ where: { email } }),
-          'Check existing user for password reset'
-        );
-
-        if (!existingUser) {
-          return res.status(404).json({
-            error: 'User Not Found',
-            message: 'No account found with this email address'
-          });
-        }
-      }
-
-      // Generate OTP
-      const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-      const otpKey = `otp:${type}:${email}`;
-      
-      // Store OTP in Redis/memory cache
-      await redisClient.set(otpKey, otpCode, { EX: 600 }); // 10 minutes expiry
-
-      // Send OTP email
-      let emailResult = null;
-      try {
-        emailResult = await sendOTPEmail(email, otpCode, type);
-        logger.info(`✅ Standalone OTP email sent`, { 
-          email, 
-          type,
-          success: emailResult?.success, 
-          isRealEmail: emailResult?.isRealEmail,
-          mode: emailResult?.mode 
-        });
-      } catch (emailError) {
-        logger.error('❌ Standalone OTP email failed:', emailError);
-      }
-
-      // Prepare response
-      const responseData = {
-        message: `OTP sent to ${email} for ${type}`,
-        email,
-        type,
-        expiresIn: 600,
-        nextStep: 'Use POST /api/auth/verify-otp to verify the OTP'
-      };
-
-      // In development, include OTP if email service is mocked
-      if (process.env.NODE_ENV === 'development' && !emailResult?.isRealEmail) {
-        responseData.otp = otpCode;
-        responseData.note = 'OTP included for development (email service mocked)';
-      }
-
-      res.status(200).json(responseData);
-
-    } catch (error) {
-      logger.error('❌ Standalone OTP generation error:', error);
-      
-      if (error.message.includes('Database connection issue')) {
-        return res.status(503).json({
-          error: 'Service Temporarily Unavailable',
-          message: 'Database connection issue. Please try again in a moment.',
-          retryAfter: 30
-        });
-      }
-      
-      next(error);
-    }
-  }
-
-  /**
-   * UNIFIED REGISTRATION METHOD
-   * Handles full registration with user data + OTP generation
-   */
-  static async register(req, res, next) {
-    try {
-      logger.info('🚀 Full registration initiated', { email: req.body.email });
-      
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
-        return res.status(400).json({ error: 'Validation failed', details: errors.array() });
+        return res.status(400).json({
+          error: 'Validation failed',
+          details: errors.array()
+        });
       }
 
       const { email, password, firstName, lastName } = req.body;
 
-      // Database availability check
-      if (!prisma || typeof prisma.user?.findUnique !== 'function') {
-        return res.status(503).json({ error: 'Database unavailable' });
-      }
+      // Check if user exists
+      const existingUser = await executeWithRetry(
+        () => prisma.user.findUnique({ where: { email } }),
+        3
+      );
 
-      // Check existing user
-      const existingUser = await prisma.user.findUnique({ where: { email } });
       if (existingUser) {
-        return res.status(409).json({ 
-          error: 'User already exists', 
-          message: 'An account with this email address already exists.' 
+        return res.status(409).json({
+          error: 'User already exists with this email address'
         });
       }
 
-      // Hash password
-      const saltRounds = parseInt(process.env.BCRYPT_SALT_ROUNDS) || 12;
-      const passwordHash = await bcrypt.hash(password, saltRounds);
-
-      // Store registration data temporarily
-      const registrationData = { email, passwordHash, firstName, lastName, role: 'user' };
-      const regKey = `registration:${email}`;
-      await redisClient.set(regKey, JSON.stringify(registrationData), { EX: 900 });
-
-      // Generate OTP
-      const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-      const otpKey = `otp:registration:${email}`;
-      await redisClient.set(otpKey, otpCode, { EX: 600 });
-
-      logger.info('📧 Sending registration OTP', { email, otpCode: process.env.NODE_ENV === 'development' ? otpCode : '***' });
-
-      // Send OTP email
-      let emailResult = null;
-      try {
-        emailResult = await sendOTPEmail(email, otpCode, 'registration');
-        logger.info(`✅ Registration OTP email sent`, { 
-          email, 
-          success: emailResult?.success, 
-          isRealEmail: emailResult?.isRealEmail,
-          mode: emailResult?.mode 
-        });
-      } catch (emailError) {
-        logger.error('❌ Registration email send failed:', emailError);
-      }
-
-      // Response
-      const responseData = {
-        message: 'Registration initiated. Please check your email for the OTP.',
+      // Generate OTP and store registration data
+      const otp = generateOTP();
+      const hashedPassword = await bcrypt.hash(password, 12);
+      
+      const registrationData = {
         email,
-        step: 'otp_verification_required',
-        expiresIn: 600,
-        nextStep: 'Use POST /api/auth/verify-otp to complete registration'
+        passwordHash: hashedPassword,
+        firstName,
+        lastName,
+        otp,
+        timestamp: Date.now(),
+        expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes
       };
 
-      // Development mode: include OTP if email service is mocked
-      if (process.env.NODE_ENV === 'development' && !emailResult?.isRealEmail) {
-        responseData.otp = otpCode;
-        responseData.note = 'OTP included for development (email service mocked)';
-      }
+      // Store in memory (use Redis in production)
+      otpStore.set(`registration:${email}`, registrationData);
+      
+      // Schedule cleanup
+      setTimeout(() => otpStore.delete(`registration:${email}`), 10 * 60 * 1000);
 
-      res.status(202).json(responseData);
+      // Send OTP email
+      await sendOTPEmail(email, otp, 'registration');
+      
+      logger.info('🚀 Registration initiated', { email });
 
+      res.status(202).json({
+        success: true,
+        message: 'Registration OTP sent to your email. Please verify to complete registration.',
+        data: { email, otpSent: true }
+      });
     } catch (error) {
-      logger.error('❌ Registration error:', error);
-      next(error);
+      logger.error('❌ Registration failed:', error);
+      res.status(500).json({
+        error: 'Registration failed',
+        message: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+      });
     }
   }
 
   /**
-   * COMPLETE REGISTRATION (Enhanced with JWT Session Management)
-   * Called only after successful OTP verification with robust error handling
+   * Verify OTP and complete registration
    */
-  static async completeRegistration(req, res, next) {
+  static async verifyOTP(req, res) {
     try {
-      const { email } = req.body;
-      
-      logger.info('🏁 Completing registration', { email });
-
-      // Get registration data
-      const regKey = `registration:${email}`;
-      const registrationDataStr = await redisClient.get(regKey);
-
-      if (!registrationDataStr) {
-        return res.status(400).json({ 
-          error: 'Registration session expired', 
-          message: 'Please start registration again.' 
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          error: 'Validation failed',
+          details: errors.array()
         });
       }
 
-      const registrationData = JSON.parse(registrationDataStr);
+      const { email, otp, type } = req.body;
 
-      // Create user and their personal tenant with enhanced error handling
-      const result = await AuthController.executeDatabaseOperation(
-        () => prisma.$transaction(async (tx) => {
-          // Create user with available fields only
+      if (type === 'registration') {
+        const registrationData = otpStore.get(`registration:${email}`);
+        
+        logger.info('🔍 Verifying OTP', { 
+          email, 
+          type, 
+          providedOtp: otp,
+          hasRegistrationData: !!registrationData,
+          storedOtp: registrationData?.otp,
+          otpMatch: registrationData?.otp === otp,
+          isExpired: registrationData ? Date.now() > registrationData.expiresAt : null
+        });
+        
+        if (!registrationData) {
+          return res.status(400).json({
+            error: 'OTP expired or invalid. Please restart registration.'
+          });
+        }
+
+        if (registrationData.otp !== otp) {
+          return res.status(400).json({
+            error: 'Invalid OTP'
+          });
+        }
+
+        if (Date.now() > registrationData.expiresAt) {
+          otpStore.delete(`registration:${email}`);
+          return res.status(400).json({
+            error: 'OTP expired. Please restart registration.'
+          });
+        }
+
+        // Create user and tenant in transaction
+        const result = await prisma.$transaction(async (tx) => {
           const user = await tx.user.create({
             data: {
               email: registrationData.email,
               passwordHash: registrationData.passwordHash,
               firstName: registrationData.firstName,
               lastName: registrationData.lastName,
-              role: registrationData.role || 'user',
               emailVerified: true,
-              emailVerifiedAt: new Date(),
-              createdAt: new Date(),
-              updatedAt: new Date()
+              emailVerifiedAt: new Date()
             }
           });
 
-          logger.info('✅ User created successfully', { 
-            userId: user.id, 
-            email: user.email 
+          logger.info('🔍 User created in transaction', { 
+            user: user,
+            hasId: !!user?.id,
+            hasEmail: !!user?.email,
+            userKeys: Object.keys(user || {}),
+            userId: user?.id,
+            userEmail: user?.email
           });
 
-          // Create tenant for the user
-          const tenant = await createTenant(tx, user);
-
-          logger.info('✅ Tenant created successfully', { 
-            tenantId: tenant.id, 
-            userId: user.id 
-          });
-
-          return { user, tenant };
-        }),
-        'Complete user registration transaction'
-      );
-
-      // Clean up temporary registration data from Redis
-      await redisClient.del([`otp:registration:${email}`, regKey]);
-
-      // Generate JWT with tenant information
-      const jwtPayload = { 
-        userId: result.user.id, 
-        email: result.user.email, 
-        tenantId: result.tenant.id,
-        role: result.user.role,
-        type: 'registration'
-      };
-
-      const token = AuthController.generateJWT(jwtPayload);
-
-      // Extract device information from request
-      const deviceInfo = {
-        userAgent: req.get('User-Agent') || 'Unknown',
-        ip: req.ip || req.connection.remoteAddress || 'Unknown',
-        platform: req.get('X-Platform') || 'web'
-      };
-
-      // Save JWT session
-      const sessionKey = await AuthController.saveJWTSession(result.user.id, token, deviceInfo);
-
-      // Set secure HTTP-only cookie for session management
-      const isProd = process.env.NODE_ENV === 'production';
-      res.cookie('auth_token', token, {
-        httpOnly: true,
-        secure: isProd,
-        sameSite: isProd ? 'strict' : 'lax',
-        path: '/',
-        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-      });
-
-      logger.info('🎉 Registration completed successfully', { 
-        userId: result.user.id, 
-        tenantId: result.tenant.id,
-        tenantIdentifier: result.tenant.tenantId,
-        sessionKey
-      });
-
-      res.status(201).json({
-        message: 'Registration completed successfully',
-        user: { 
-          id: result.user.id, 
-          email: result.user.email, 
-          firstName: result.user.firstName,
-          lastName: result.user.lastName,
-          role: result.user.role,
-          emailVerified: result.user.emailVerified
-        },
-        tenant: { 
-          id: result.tenant.id, 
-          name: result.tenant.name,
-          tenantId: result.tenant.tenantId,
-          domain: result.tenant.domain,
-          role: 'owner'
-        },
-        token,
-        session: {
-          sessionKey,
-          expiresIn: process.env.JWT_EXPIRES_IN || '7d',
-          tokenType: 'Bearer',
-          deviceInfo: {
-            platform: deviceInfo.platform,
-            registeredAt: new Date().toISOString()
+          // Ensure user has required fields before creating tenant
+          if (!user || !user.id || !user.email) {
+            throw new Error(`User creation failed: missing required fields. User: ${JSON.stringify(user)}`);
           }
-        }
-      });
 
-    } catch (error) {
-      logger.error('❌ Registration completion error:', {
-        error: error.message,
-        stack: error.stack,
-        email: req.body?.email
-      });
-      
-      // Enhanced error handling for database issues
-      if (error.message.includes('Database connection issue')) {
-        return res.status(503).json({
-          error: 'Service Temporarily Unavailable',
-          message: 'Unable to complete registration due to database connectivity. Please try again.',
-          retryAfter: 30
+          const tenant = await createTenant(tx, user);
+          return { user, tenant };
         });
-      } else if (error.message.includes('already exists')) {
-        return res.status(409).json({
-          error: 'User Already Exists',
-          message: 'An account with this email already exists'
+
+        // Clean up OTP store
+        otpStore.delete(`registration:${email}`);
+
+        // Generate JWT token
+        const token = generateToken({
+          userId: result.user.id,
+          email: result.user.email,
+          tenantId: result.tenant.tenantId
+        });
+
+        logger.info('✅ Registration completed', { 
+          userId: result.user.id, 
+          tenantId: result.tenant.tenantId 
+        });
+
+        res.status(201).json({
+          success: true,
+          message: 'Registration completed successfully',
+          data: {
+            user: {
+              id: result.user.id,
+              email: result.user.email,
+              firstName: result.user.firstName,
+              lastName: result.user.lastName
+            },
+            tenant: {
+              id: result.tenant.id,
+              tenantId: result.tenant.tenantId,
+              name: result.tenant.name,
+              domain: result.tenant.domain
+            },
+            token
+          }
+        });
+      } else {
+        res.status(400).json({
+          error: 'Invalid OTP type'
         });
       }
-      
-      next(error);
+    } catch (error) {
+      logger.error('❌ OTP verification failed:', error);
+      res.status(500).json({
+        error: 'OTP verification failed',
+        message: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+      });
     }
   }
 
   /**
-   * ENHANCED LOGIN METHOD with JWT Session Restoration (FIXED)
+   * User login
    */
-  static async login(req, res, next) {
+  static async login(req, res) {
     try {
-      logger.info('🔐 Login attempt', { email: req.body.email });
-
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
-        return res.status(400).json({ error: 'Validation failed', details: errors.array() });
+        return res.status(400).json({
+          error: 'Validation failed',
+          details: errors.array()
+        });
       }
 
       const { email, password } = req.body;
+      logger.info('🔐 Login attempt', { email });
 
-      // Find user with enhanced error handling - FIXED QUERY
-      const user = await AuthController.executeDatabaseOperation(
+      // Find user
+      const user = await executeWithRetry(
         () => prisma.user.findUnique({ 
           where: { email },
-          select: {
-            id: true,
-            email: true,
-            firstName: true,
-            lastName: true,
-            role: true,
-            passwordHash: true,
-            emailVerified: true,
-            emailVerifiedAt: true,
-            lastLoginAt: true,
-            createdAt: true,
-            updatedAt: true
+          include: {
+            tenants: {
+              select: {
+                id: true,
+                tenantId: true,
+                name: true,
+                domain: true,
+                status: true
+              }
+            }
           }
         }),
-        'User lookup for login'
+        3
       );
 
       if (!user) {
-        logger.warn('❌ Login failed - user not found', { email });
-        return res.status(401).json({ 
-          error: 'Invalid credentials',
-          message: 'Email or password is incorrect'
+        return res.status(401).json({
+          error: 'Invalid credentials'
         });
       }
 
       // Verify password
-      const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
-      if (!isPasswordValid) {
-        logger.warn('❌ Login failed - invalid password', { email, userId: user.id });
-        return res.status(401).json({ 
-          error: 'Invalid credentials',
-          message: 'Email or password is incorrect'
+      const isValidPassword = await bcrypt.compare(password, user.passwordHash);
+      if (!isValidPassword) {
+        return res.status(401).json({
+          error: 'Invalid credentials'
         });
       }
 
-      // Check if user is active/verified
-      if (!user.emailVerified) {
-        return res.status(403).json({
-          error: 'Account Not Verified',
-          message: 'Please verify your email address before logging in',
-          requiresVerification: true
-        });
-      }
-
-      // Get user's primary tenant in a separate query - FIXED APPROACH
-      const primaryTenant = await AuthController.executeDatabaseOperation(
-        () => prisma.tenant.findFirst({
-          where: { 
-            ownerId: user.id,
-            status: 'active'
-          },
-          select: {
-            id: true,
-            name: true,
-            tenantId: true,
-            domain: true,
-            status: true
-          }
-        }),
-        'Get user primary tenant for login'
-      );
-
-      // Generate JWT with comprehensive payload
-      const jwtPayload = { 
-        userId: user.id, 
-        email: user.email, 
-        tenantId: primaryTenant?.id || null,
-        role: user.role,
-        type: 'login',
-        permissions: [] // Add user permissions here if applicable
-      };
-
-      const token = AuthController.generateJWT(jwtPayload);
-
-      // Extract device information from request
-      const deviceInfo = {
-        userAgent: req.get('User-Agent') || 'Unknown',
-        ip: req.ip || req.connection.remoteAddress || 'Unknown',
-        platform: req.get('X-Platform') || 'web'
-      };
-
-      // Save JWT session
-      const sessionKey = await AuthController.saveJWTSession(user.id, token, deviceInfo);
-
-      // Update last login timestamp
-      await AuthController.executeDatabaseOperation(
+      // Update last login
+      await executeWithRetry(
         () => prisma.user.update({
           where: { id: user.id },
-          data: { 
-            lastLoginAt: new Date(),
-            updatedAt: new Date()
-          }
+          data: { lastLoginAt: new Date() }
         }),
-        'Update last login timestamp'
+        3
       );
 
-      // Set secure HTTP-only cookie for session management
-      const isProd = process.env.NODE_ENV === 'production';
-      res.cookie('auth_token', token, {
-        httpOnly: true,
-        secure: isProd,
-        sameSite: isProd ? 'strict' : 'lax',
-        path: '/',
-        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-      });
-
-      logger.info('✅ Login successful', { 
-        userId: user.id, 
+      // Generate JWT token
+      const token = generateToken({
+        userId: user.id,
         email: user.email,
-        tenantId: primaryTenant?.id,
-        sessionKey
+        tenantId: user.tenants[0]?.tenantId || null
       });
 
-      // Prepare response without sensitive data
-      const userResponse = {
-        id: user.id, 
-        email: user.email, 
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-        emailVerified: user.emailVerified,
-        lastLoginAt: new Date().toISOString()
-      };
+      logger.info('✅ Login successful', { userId: user.id });
 
-      const tenantResponse = primaryTenant ? {
-        id: primaryTenant.id,
-        name: primaryTenant.name,
-        tenantId: primaryTenant.tenantId,
-        domain: primaryTenant.domain,
-        role: 'owner'
-      } : null;
-
-      res.status(200).json({
+      res.json({
+        success: true,
         message: 'Login successful',
-        user: userResponse,
-        tenant: tenantResponse,
-        token,
-        session: {
-          sessionKey,
-          expiresIn: process.env.JWT_EXPIRES_IN || '7d',
-          tokenType: 'Bearer',
-          deviceInfo: {
-            platform: deviceInfo.platform,
-            loginAt: new Date().toISOString()
-          }
+        data: {
+          user: {
+            id: user.id,
+            email: user.email,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            role: user.role,
+            emailVerified: user.emailVerified
+          },
+          tenants: user.tenants,
+          token
         }
       });
-
     } catch (error) {
-      logger.error('❌ Login error:', {
-        error: error.message,
-        stack: error.stack,
-        email: req.body?.email
+      logger.error('❌ Login failed:', error);
+      res.status(500).json({
+        error: 'Login failed',
+        message: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
       });
-
-      if (error.message.includes('Database connection issue')) {
-        return res.status(503).json({
-          error: 'Service Temporarily Unavailable',
-          message: 'Unable to process login due to database connectivity. Please try again.',
-          retryAfter: 30
-        });
-      }
-
-      next(error);
     }
   }
 
   /**
-   * UNIFIED OTP VERIFICATION METHOD
-   * Handles all OTP verifications and completes registration
+   * Send OTP for various purposes
    */
-  static async verifyOTP(req, res, next) {
+  static async sendOTP(req, res) {
     try {
-      logger.info('🔍 OTP verification started', { email: req.body.email, type: req.body.type });
-      
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({ error: 'Validation failed', details: errors.array() });
-      }
+      const { email, type = 'registration' } = req.body;
 
-      const { email, otp, type } = req.body;
-
-      // Verify OTP
-      const otpKey = `otp:${type}:${email}`;
-      const storedOTP = await redisClient.get(otpKey);
-
-      if (!storedOTP) {
-        return res.status(400).json({ 
-          error: 'OTP expired', 
-          message: 'OTP has expired. Please request a new one.' 
+      if (!email || !email.includes('@')) {
+        return res.status(400).json({
+          error: 'Valid email address is required'
         });
       }
 
-      if (storedOTP !== otp) {
-        return res.status(400).json({ 
-          error: 'Invalid OTP', 
-          message: 'The OTP you entered is incorrect.' 
-        });
-      }
-
-      logger.info('✅ OTP verified successfully', { email, type });
-
-      // Delete OTP immediately after verification
-      await redisClient.del(otpKey);
-
-      // Handle registration completion
+      // For registration type, check if registration data already exists
       if (type === 'registration') {
-        return await AuthController.completeRegistration(req, res, next);
+        const existingRegistration = otpStore.get(`registration:${email}`);
+        if (existingRegistration) {
+          // Update the OTP in existing registration data
+          const newOtp = generateOTP();
+          existingRegistration.otp = newOtp;
+          existingRegistration.timestamp = Date.now();
+          existingRegistration.expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+          
+          otpStore.set(`registration:${email}`, existingRegistration);
+          
+          // Send new OTP email
+          await sendOTPEmail(email, newOtp, type);
+          
+          logger.info('📧 Resending registration OTP', { email, type });
+          
+          return res.json({
+            success: true,
+            message: `New OTP sent to ${email}`,
+            data: { email, type, otpSent: true }
+          });
+        }
       }
 
-      // For other OTP types
-      res.status(200).json({
-        message: 'OTP verified successfully',
+      const otp = generateOTP();
+      
+      // Store OTP with expiration (for non-registration types)
+      const otpData = {
+        otp,
         email,
         type,
-        verified: true
+        timestamp: Date.now(),
+        expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes
+      };
+
+      otpStore.set(`${type}:${email}`, otpData);
+      
+      // Schedule cleanup
+      setTimeout(() => otpStore.delete(`${type}:${email}`), 10 * 60 * 1000);
+
+      // Send OTP email
+      await sendOTPEmail(email, otp, type);
+
+      logger.info('📧 Standalone OTP request', { email, type });
+
+      res.json({
+        success: true,
+        message: `OTP sent to ${email}`,
+        data: { email, type, otpSent: true }
       });
-
     } catch (error) {
-      logger.error('❌ OTP verification error:', error);
-      next(error);
-    }
-  }
-
-  /**
-   * LOGOUT METHOD - Invalidates JWT session
-   */
-  static async logout(req, res, next) {
-    try {
-      const token = req.cookies.auth_token || req.headers.authorization?.replace('Bearer ', '');
-      
-      if (!token) {
-        return res.status(400).json({
-          error: 'No active session',
-          message: 'No authentication token found'
-        });
-      }
-
-      // Decode token to get user ID
-      const decoded = await AuthController.validateAndRestoreJWT(token);
-      
-      // Invalidate session in Redis
-      const userSessionsKey = `user_sessions:${decoded.userId}`;
-      const sessionsData = await redisClient.get(userSessionsKey);
-      
-      if (sessionsData) {
-        const sessions = JSON.parse(sessionsData);
-        // Remove the current session and invalidate associated session keys
-        for (const session of sessions) {
-          await redisClient.del(session.sessionKey);
-        }
-        await redisClient.del(userSessionsKey);
-      }
-
-      // Clear cookie
-      res.clearCookie('auth_token');
-
-      logger.info('✅ Logout successful', { userId: decoded.userId });
-
-      res.status(200).json({
-        message: 'Logout successful',
-        loggedOut: true
-      });
-
-    } catch (error) {
-      logger.error('❌ Logout error:', error);
-      // Clear cookie anyway
-      res.clearCookie('auth_token');
-      
-      res.status(200).json({
-        message: 'Logout completed',
-        note: 'Session may have already been invalid'
+      logger.error('❌ Send OTP failed:', error);
+      res.status(500).json({
+        error: 'Failed to send OTP',
+        message: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
       });
     }
   }
 
   /**
-   * GET CURRENT USER - Validates and restores JWT session
+   * Refresh JWT token
    */
-  static async getCurrentUser(req, res, next) {
+  static async refreshToken(req, res) {
     try {
-      const token = req.cookies.auth_token || req.headers.authorization?.replace('Bearer ', '');
-      
-      if (!token) {
-        return res.status(401).json({
-          error: 'Unauthorized',
-          message: 'Authentication token required'
-        });
-      }
+      const { user } = req; // From auth middleware
 
-      // Validate and restore JWT
-      const decoded = await AuthController.validateAndRestoreJWT(token);
+      const token = generateToken({
+        userId: user.id,
+        email: user.email,
+        tenantId: user.tenantId
+      });
+
+      res.json({
+        success: true,
+        data: { token }
+      });
+    } catch (error) {
+      logger.error('❌ Token refresh failed:', error);
+      res.status(500).json({
+        error: 'Token refresh failed'
+      });
+    }
+  }
+
+  /**
+   * User logout
+   */
+  static async logout(req, res) {
+    try {
+      // In a stateless JWT system, logout is handled client-side
+      // Could implement token blacklisting with Redis if needed
       
-      // Get current user data
-      const user = await AuthController.executeDatabaseOperation(
+      res.json({
+        success: true,
+        message: 'Logged out successfully'
+      });
+    } catch (error) {
+      logger.error('❌ Logout failed:', error);
+      res.status(500).json({
+        error: 'Logout failed'
+      });
+    }
+  }
+
+  /**
+   * Get current user profile
+   */
+  static async getProfile(req, res) {
+    try {
+      const { user } = req; // From auth middleware
+
+      const userProfile = await executeWithRetry(
         () => prisma.user.findUnique({
-          where: { id: decoded.userId },
+          where: { id: user.id },
           select: {
             id: true,
             email: true,
@@ -898,57 +467,160 @@ class AuthController {
             lastName: true,
             role: true,
             emailVerified: true,
-            lastLoginAt: true,
-            createdAt: true
+            createdAt: true,
+            lastLoginAt: true
           }
         }),
-        'Get current user data'
+        3
+      );
+
+      if (!userProfile) {
+        return res.status(404).json({
+          error: 'User not found'
+        });
+      }
+
+      res.json({
+        success: true,
+        data: { user: userProfile }
+      });
+    } catch (error) {
+      logger.error('❌ Get profile failed:', error);
+      res.status(500).json({
+        error: 'Failed to get user profile'
+      });
+    }
+  }
+
+  /**
+   * Get current authenticated user information
+   */
+  static async getCurrentUser(req, res) {
+    try {
+      const { userId } = req.user; // From auth middleware
+
+      // Get user with tenants
+      const user = await executeWithRetry(
+        () => prisma.user.findUnique({
+          where: { id: userId },
+          select: {
+            id: true,
+            email: true,
+            firstName: true,
+            lastName: true,
+            role: true,
+            emailVerified: true,
+            emailVerifiedAt: true,
+            lastLoginAt: true,
+            createdAt: true,
+            updatedAt: true,
+            tenants: {
+              select: {
+                id: true,
+                tenantId: true,
+                name: true,
+                domain: true,
+                status: true,
+                createdAt: true
+              }
+            }
+          }
+        }),
+        3
       );
 
       if (!user) {
         return res.status(404).json({
           error: 'User not found',
-          message: 'User account no longer exists'
+          message: 'The authenticated user could not be found'
         });
       }
 
-      // Get user's tenant information
-      const tenant = decoded.tenantId ? await AuthController.executeDatabaseOperation(
-        () => prisma.tenant.findUnique({
-          where: { id: decoded.tenantId },
-          select: {
-            id: true,
-            name: true,
-            tenantId: true,
-            domain: true,
-            status: true
-          }
-        }),
-        'Get user tenant data'
-      ) : null;
+      logger.info('✅ Current user retrieved', { userId: user.id });
 
-      res.status(200).json({
-        user,
-        tenant,
-        session: {
-          tokenType: 'Bearer',
-          expiresIn: process.env.JWT_EXPIRES_IN || '7d',
-          isValid: true
+      res.json({
+        success: true,
+        message: 'User profile retrieved successfully',
+        data: {
+          user: {
+            id: user.id,
+            email: user.email,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            role: user.role,
+            emailVerified: user.emailVerified,
+            emailVerifiedAt: user.emailVerifiedAt,
+            lastLoginAt: user.lastLoginAt,
+            createdAt: user.createdAt,
+            updatedAt: user.updatedAt
+          },
+          tenants: user.tenants,
+          meta: {
+            tenantCount: user.tenants.length,
+            accountAge: Math.floor((new Date() - new Date(user.createdAt)) / (1000 * 60 * 60 * 24)) // days
+          }
         }
       });
-
     } catch (error) {
-      logger.error('❌ Get current user error:', error);
-      
-      if (error.message.includes('Invalid or expired session')) {
-        return res.status(401).json({
-          error: 'Session Expired',
-          message: 'Please log in again',
-          requiresReauth: true
+      logger.error('❌ Get current user failed:', error);
+      res.status(500).json({
+        error: 'Failed to get user information',
+        message: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+      });
+    }
+  }
+
+  /**
+   * Debug OTP store (development only)
+   */
+  static async debugOTPStore(req, res) {
+    try {
+      if (process.env.NODE_ENV !== 'development') {
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'Debug endpoints only available in development'
         });
       }
 
-      next(error);
+      const { email } = req.query;
+      
+      if (email) {
+        // Show OTPs for specific email
+        const registrationData = otpStore.get(`registration:${email}`);
+        const otherOTPs = {};
+        
+        ['password_reset', 'email_verification'].forEach(type => {
+          const data = otpStore.get(`${type}:${email}`);
+          if (data) otherOTPs[type] = data;
+        });
+
+        res.json({
+          email,
+          registrationData,
+          otherOTPs,
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        // Show all OTPs
+        const allOTPs = {};
+        for (const [key, value] of otpStore.entries()) {
+          allOTPs[key] = {
+            ...value,
+            otp: '***' // Hide actual OTP for security
+          };
+        }
+
+        res.json({
+          totalOTPs: otpStore.size,
+          otps: allOTPs,
+          timestamp: new Date().toISOString()
+        });
+      }
+    } catch (error) {
+      logger.error('❌ Debug OTP store failed:', error);
+      res.status(500).json({
+        error: 'Failed to get OTP store debug info'
+      });
     }
   }
 }

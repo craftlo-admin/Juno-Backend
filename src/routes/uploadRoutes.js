@@ -5,10 +5,10 @@ const fs = require('fs').promises;
 const { body, validationResult } = require('express-validator');
 const rateLimit = require('express-rate-limit');
 
-const auth = require('../middleware/auth');
+const { authenticateToken } = require('../middleware/auth');
 const logger = require('../utils/logger');
 const { uploadToS3, deleteFromS3 } = require('../services/awsService');
-const prisma = require('../config/database');
+const prisma = require('../lib/prisma');
 
 /**
  * Multi-tenant Upload Routes
@@ -134,7 +134,7 @@ const validateUpload = [
  */
 router.post('/single',
   uploadRateLimit,
-  auth,
+  authenticateToken,
   upload.single('file'),
   validateUpload,
   async (req, res) => {
@@ -313,7 +313,7 @@ router.post('/single',
  */
 router.post('/multiple',
   uploadRateLimit,
-  auth,
+  authenticateToken,
   upload.array('files', 10),
   validateUpload,
   async (req, res) => {
@@ -495,7 +495,7 @@ router.post('/multiple',
  * @tenant-aware Yes
  */
 router.get('/files',
-  auth,
+  authenticateToken,
   async (req, res) => {
     try {
       const {
@@ -607,7 +607,7 @@ router.get('/files',
  * @tenant-aware Yes
  */
 router.delete('/files/:id',
-  auth,
+  authenticateToken,
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -681,7 +681,7 @@ router.delete('/files/:id',
  * @tenant-aware Yes
  */
 router.get('/storage-stats',
-  auth,
+  authenticateToken,
   async (req, res) => {
     try {
       const stats = await prisma.uploadedFile.aggregate({

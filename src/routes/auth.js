@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const AuthController = require('../controllers/AuthController');
+const { authenticateToken } = require('../middleware/auth');
 const logger = require('../utils/logger');
 
 /**
@@ -89,23 +90,18 @@ try {
     validateAndHandle(AuthController.validateLogin || [], AuthController.login)
   );
 
-  // GET CURRENT USER
-  router.get('/me', async (req, res) => {
+  // GET CURRENT USER (Protected route)
+  router.get('/me', authenticateToken, async (req, res) => {
     try {
-      if (typeof AuthController.getCurrentUser === 'function') {
-        await AuthController.getCurrentUser(req, res);
-      } else {
-        res.status(501).json({
-          error: 'Not Implemented',
-          message: 'User profile endpoint not yet implemented'
-        });
-      }
+      await AuthController.getCurrentUser(req, res);
     } catch (error) {
       logger.error('Get current user error:', error);
-      res.status(500).json({
-        error: 'Internal Server Error',
-        message: 'Failed to get user information'
-      });
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Internal Server Error',
+          message: 'Failed to get user information'
+        });
+      }
     }
   });
 
@@ -192,6 +188,9 @@ try {
         });
       }
     });
+
+    // Debug OTP store
+    router.get('/debug/otp', AuthController.debugOTPStore);
   }
 
   logger.info('✅ Auth routes loaded successfully', {

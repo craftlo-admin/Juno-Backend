@@ -1,6 +1,16 @@
 const jwt = require('jsonwebtoken');
-const prisma = require('../lib/prisma');
 const logger = require('../utils/logger');
+
+// Import enhanced Prisma client
+let prisma, executeWithRetry;
+try {
+  const dbModule = require('../lib/prisma');
+  prisma = dbModule.prisma;
+  executeWithRetry = dbModule.executeWithRetry;
+  logger.info('✅ Enhanced Prisma client imported successfully in auth middleware');
+} catch (error) {
+  logger.error('❌ Failed to import enhanced Prisma client in auth middleware:', error);
+}
 
 /**
  * Middleware to authenticate JWT tokens from cookies or Authorization header
@@ -37,20 +47,23 @@ const authenticateToken = async (req, res, next) => {
       });
     }
 
-    // ✅ FIXED: Use Prisma to find user instead of legacy model
-    const user = await prisma.user.findUnique({
-      where: { id: decoded.userId },
-      select: {
-        id: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        role: true,
-        emailVerified: true,
-        lastLoginAt: true,
-        createdAt: true
-      }
-    });
+    // ✅ FIXED: Use enhanced Prisma client with retry mechanism
+    const user = await executeWithRetry(
+      () => prisma.user.findUnique({
+        where: { id: decoded.userId },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          role: true,
+          emailVerified: true,
+          lastLoginAt: true,
+          createdAt: true
+        }
+      }),
+      3
+    );
 
     if (!user) {
       return res.status(401).json({
@@ -186,20 +199,23 @@ const optionalAuth = async (req, res, next) => {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       
       if (decoded.userId) {
-        // ✅ FIXED: Use Prisma to find user
-        const user = await prisma.user.findUnique({
-          where: { id: decoded.userId },
-          select: {
-            id: true,
-            email: true,
-            firstName: true,
-            lastName: true,
-            role: true,
-            emailVerified: true,
-            lastLoginAt: true,
-            createdAt: true
-          }
-        });
+        // ✅ FIXED: Use enhanced Prisma client with retry mechanism
+        const user = await executeWithRetry(
+          () => prisma.user.findUnique({
+            where: { id: decoded.userId },
+            select: {
+              id: true,
+              email: true,
+              firstName: true,
+              lastName: true,
+              role: true,
+              emailVerified: true,
+              lastLoginAt: true,
+              createdAt: true
+            }
+          }),
+          3
+        );
 
         if (user && user.emailVerified) {
           req.user = {

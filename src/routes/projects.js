@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const ProjectController = require('../controllers/ProjectController');
-const authMiddleware = require('../middleware/authMiddleware');
+const { authenticateToken } = require('../middleware/auth');
 const tenantMiddleware = require('../middleware/tenantMiddleware');
 
 /**
@@ -10,7 +10,7 @@ const tenantMiddleware = require('../middleware/tenantMiddleware');
  */
 
 // Apply authentication and tenant middleware to all routes
-router.use(authMiddleware);
+router.use(authenticateToken);
 router.use(tenantMiddleware);
 
 // Project CRUD operations
