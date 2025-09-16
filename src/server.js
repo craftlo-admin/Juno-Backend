@@ -185,22 +185,44 @@ try {
   });
 }
 
-// Upload routes - FIXED: Use correct file name
+// File Management routes (general file uploads, projects, etc.)
+let fileManagementRoutes;
 try {
-  uploadRoutes = require('./routes/uploadRoutes'); // Fixed from './routes/uploads'
-  logger.info('✅ Upload routes loaded successfully');
-} catch (uploadError) {
-  logger.error('❌ Failed to load upload routes:', {
-    error: uploadError.message,
-    stack: process.env.NODE_ENV === 'development' ? uploadError.stack : undefined
+  fileManagementRoutes = require('./routes/fileManagementRoutes');
+  logger.info('✅ File management routes loaded successfully');
+} catch (fileError) {
+  logger.error('❌ Failed to load file management routes:', {
+    error: fileError.message,
+    stack: process.env.NODE_ENV === 'development' ? fileError.stack : undefined
   });
   
-  uploadRoutes = express.Router();
-  uploadRoutes.use('*', (req, res) => {
+  fileManagementRoutes = express.Router();
+  fileManagementRoutes.use('*', (req, res) => {
     res.status(503).json({
-      error: 'Upload Service Unavailable',
-      message: 'File upload service temporarily unavailable.',
-      details: process.env.NODE_ENV === 'development' ? uploadError.message : 'Service unavailable'
+      error: 'File Management Service Unavailable',
+      message: 'File management temporarily unavailable.',
+      details: process.env.NODE_ENV === 'development' ? fileError.message : 'Service unavailable'
+    });
+  });
+}
+
+// Build Upload routes (RAR uploads for tenant builds)
+let buildUploadRoutes;
+try {
+  buildUploadRoutes = require('./routes/buildUploadRoutes');
+  logger.info('✅ Build upload routes loaded successfully');
+} catch (buildError) {
+  logger.error('❌ Failed to load build upload routes:', {
+    error: buildError.message,
+    stack: process.env.NODE_ENV === 'development' ? buildError.stack : undefined
+  });
+  
+  buildUploadRoutes = express.Router();
+  buildUploadRoutes.use('*', (req, res) => {
+    res.status(503).json({
+      error: 'Build Upload Service Unavailable',
+      message: 'Build upload temporarily unavailable.',
+      details: process.env.NODE_ENV === 'development' ? buildError.message : 'Service unavailable'
     });
   });
 }
@@ -500,7 +522,8 @@ if (process.env.NODE_ENV === 'development') {
 // API Routes - Core routes (essential for platform functionality)
 app.use('/api/auth', authRoutes);
 app.use('/api/tenants', tenantRoutes);
-app.use('/api/upload', uploadRoutes); // Fixed from '/api/uploads' to match route definitions
+app.use('/api/files', fileManagementRoutes); // General file management (projects, uploads, etc.)
+app.use('/api/builds', buildUploadRoutes); // RAR uploads for tenant builds
 app.use('/api/projects', projectRoutes);
 
 // API Routes - Advanced features (with graceful degradation)
@@ -526,9 +549,11 @@ app.use('*', (req, res) => {
       'POST /api/auth/verify-otp',
       'GET /api/tenants',
       'POST /api/tenants',
-      'POST /api/upload/single',
-      'POST /api/upload/multiple',
-      'GET /api/upload/files',
+      'POST /api/files/single',
+      'POST /api/files/multiple', 
+      'GET /api/files/list',
+      'POST /api/builds (RAR upload for tenant)',
+      'GET /api/builds/:tenantId/list',
       'POST /api/projects',
       'GET /api/projects',
       '--- Advanced Features ---',

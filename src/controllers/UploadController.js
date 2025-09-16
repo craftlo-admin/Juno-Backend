@@ -1,7 +1,7 @@
 const multer = require('multer');
 const path = require('path');
 const { body, validationResult } = require('express-validator');
-const prisma = require('../lib/prisma');
+const { prisma } = require('../lib/prisma');
 const logger = require('../utils/logger');
 const { buildQueue } = require('../services/buildService');
 const storageService = require('../services/storageService');
@@ -10,13 +10,19 @@ const storageService = require('../services/storageService');
 const upload = multer({
   dest: 'temp/uploads/',
   limits: {
-    fileSize: parseInt(process.env.MAX_UPLOAD_SIZE?.replace('mb', '')) * 1024 * 1024 || 100 * 1024 * 1024, // 100MB default
+    fileSize: (() => {
+      const maxSize = process.env.MAX_UPLOAD_SIZE || '100mb';
+      const sizeInMB = parseInt(maxSize.replace(/mb|MB/i, ''));
+      return sizeInMB * 1024 * 1024; // Convert MB to bytes
+    })()
   },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/zip' || file.originalname.endsWith('.zip')) {
+    if (file.mimetype === 'application/x-rar-compressed' || 
+        file.mimetype === 'application/vnd.rar' || 
+        file.originalname.endsWith('.rar')) {
       cb(null, true);
     } else {
-      cb(new Error('Only ZIP files are allowed'), false);
+      cb(new Error('Only RAR files are allowed'), false);
     }
   }
 });
@@ -30,17 +36,65 @@ class UploadController {
   ];
 
   /**
-   * Upload ZIP file and create build job
+   * Upload RAR file using user's first tenant (auto-tenant detection)
+   */
+  static async uploadFileForUser(req, res, next) {
+    try {
+      const { userId } = req.user;
+
+      console.log('-------------------Authenticated userId:', userId);
+      console.log('-------------------Prisma object:', typeof prisma);
+      console.log('-------------------TenantMember available:', !!prisma?.tenantMember);
+
+      // Find user's first tenant
+      const tenantMembership = await prisma.tenantMember.findFirst({
+        where: { 
+          userId: userId,
+          status: 'active'
+        },
+        include: {
+          tenant: true
+        },
+        orderBy: {
+          joinedAt: 'asc' // Get the first tenant they joined
+        }
+      });
+
+      if (!tenantMembership) {
+        return res.status(404).json({
+          success: false,
+          error: 'No tenant found',
+          message: 'User is not a member of any active tenant'
+        });
+      }
+
+      // Attach tenant info to request (similar to tenantAuth middleware)
+      req.tenant = tenantMembership.tenant;
+      req.params.tenantId = tenantMembership.tenant.tenantId;
+
+      // Call the existing uploadFile method
+      return await UploadController.uploadFile(req, res, next);
+    } catch (error) {
+      logger.error('Upload file for user error:', error);
+      next(error);
+    }
+  }
+
+  /**
+   * Upload RAR file and create build job
    */
   static async uploadFile(req, res, next) {
     try {
       const { tenantId } = req.params;
       const { userId } = req.user;
 
+      console.log('-------------------TenantId:', tenantId);
+      console.log('-------------------UserId:', userId);
+
       if (!req.file) {
         return res.status(400).json({
           error: 'No file uploaded',
-          message: 'Please provide a ZIP file'
+          message: 'Please provide a RAR file'
         });
       }
 
@@ -76,7 +130,7 @@ class UploadController {
       });
 
       // Upload source file to storage
-      const storageKey = `tenants/${tenantId}/builds/${build.id}/source.zip`;
+      const storageKey = `tenants/${tenantId}/builds/${build.id}/source.rar`;
       await storageService.uploadFile(req.file.path, storageKey);
 
       // Add to build queue
@@ -264,7 +318,7 @@ class UploadController {
       });
 
       // Re-queue the build
-      const storageKey = `tenants/${req.tenant.tenantId}/builds/${build.id}/source.zip`;
+      const storageKey = `tenants/${req.tenant.tenantId}/builds/${build.id}/source.rar`;
       await buildQueue.add('process-build', {
         buildId: build.id,
         tenantId: req.tenant.id,

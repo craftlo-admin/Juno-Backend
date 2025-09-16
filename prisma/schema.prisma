@@ -23,6 +23,8 @@ model User {
   auditLogs              AuditLog[]
   tenants                Tenant[]
   uploadedFiles          UploadedFile[]
+  tenantMemberships      TenantMember[]
+  builds                 Build[]
 
   @@index([email])
   @@map("users")
@@ -48,6 +50,7 @@ model Tenant {
   builds            Build[]
   deployments       Deployment[]
   projects          Project[]
+  members           TenantMember[]
   owner             User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
@@ -60,8 +63,14 @@ model Tenant {
 model Build {
   id           String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId     String       @map("tenant_id")
+  userId       String       @map("user_id") @db.Uuid
   version      String
   status       String       @default("pending")
+  framework    String?      // nextjs, react, vue, static
+  sourceFile   String?      @map("source_file")
+  buildCommand String?      @map("build_command")
+  outputDir    String?      @map("output_dir")
+  nodeVersion  String?      @map("node_version")
   uploadPath   String?      @map("upload_path")
   buildPath    String?      @map("build_path")
   logsPath     String?      @map("logs_path")
@@ -75,9 +84,11 @@ model Build {
   projectId    String?      @map("project_id") @db.Uuid
   project      Project?     @relation(fields: [projectId], references: [id])
   tenant       Tenant       @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   deployments  Deployment[]
 
   @@index([tenantId])
+  @@index([userId])
   @@index([projectId])
   @@index([status])
   @@index([version])
@@ -176,4 +187,26 @@ model Project {
   @@index([name])
   @@index([tenantId, createdAt])
   @@map("projects")
+}
+
+model TenantMember {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  role      String   @default("member") // owner, admin, member
+  status    String   @default("active") // active, inactive, pending
+  joinedAt  DateTime @default(now()) @map("joined_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  // Relations
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId])
+  @@index([tenantId])
+  @@index([userId])
+  @@index([role])
+  @@index([status])
+  @@map("tenant_members")
 }

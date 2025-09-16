@@ -4,6 +4,13 @@ const { UploadController, upload } = require('../controllers/UploadController');
 const { authenticateToken } = require('../middleware/auth');
 const authorizeTenantAccess = require('../middleware/tenantAuth');
 
+// Upload RAR file using user's first tenant (auto-tenant detection)
+router.post('/', 
+  authenticateToken, 
+  upload,
+  UploadController.uploadFileForUser
+);
+
 // Upload routes (require tenant membership)
 router.post('/:tenantId', 
   authenticateToken, 

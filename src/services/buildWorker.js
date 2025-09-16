@@ -1,7 +1,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 const { spawn } = require('child_process');
-const unzipper = require('unzipper');
+const { createExtractorFromData } = require('node-unrar-js');
 const archiver = require('archiver');
 const { v4: uuidv4 } = require('uuid');
 const os = require('os');
@@ -23,7 +23,7 @@ async function processBuilds(job) {
     // Update job progress
     job.progress(10);
     
-    // Step 1: Download and extract ZIP
+    // Step 1: Download and extract RAR
     await downloadAndExtract(uploadPath, workDir);
     job.progress(25);
     
@@ -75,29 +75,58 @@ async function downloadAndExtract(uploadPath, workDir) {
     // Create work directory
     await fs.mkdir(workDir, { recursive: true });
     
-    // Download ZIP from S3
-    const zipData = await getFromS3({
+    // Download RAR from S3
+    const rarData = await getFromS3({
       key: uploadPath,
       bucket: process.env.AWS_S3_BUCKET_UPLOADS
     });
     
-    // Save ZIP temporarily
-    const zipPath = path.join(workDir, 'source.zip');
-    await fs.writeFile(zipPath, zipData.Body);
+    // Save RAR temporarily
+    const rarPath = path.join(workDir, 'source.rar');
+    await fs.writeFile(rarPath, rarData.Body);
     
-    // Extract ZIP
+    // Extract RAR
     const extractDir = path.join(workDir, 'source');
     await fs.mkdir(extractDir, { recursive: true });
     
-    await new Promise((resolve, reject) => {
-      fs.createReadStream(zipPath)
-        .pipe(unzipper.Extract({ path: extractDir }))
-        .on('close', resolve)
-        .on('error', reject);
-    });
+    try {
+      // Read RAR file as buffer
+      const rarBuffer = await fs.readFile(rarPath);
+      
+      // Create extractor
+      const extractor = await createExtractorFromData({ data: rarBuffer });
+      
+      // Extract all files
+      const list = extractor.getFileList();
+      const extractedFiles = list.fileHeaders;
+      
+      for (const fileHeader of extractedFiles) {
+        if (!fileHeader.flags.directory) {
+          const extracted = extractor.extract({ files: [fileHeader.name] });
+          const files = [...extracted.files];
+          
+          if (files.length > 0) {
+            const file = files[0];
+            const filePath = path.join(extractDir, fileHeader.name);
+            
+            // Create directory if needed
+            const dir = path.dirname(filePath);
+            await fs.mkdir(dir, { recursive: true });
+            
+            // Write file
+            await fs.writeFile(filePath, file.extraction);
+          }
+        }
+      }
+      
+      extractor.free();
+    } catch (extractError) {
+      logger.error('RAR extraction error:', extractError);
+      throw new Error(`Failed to extract RAR file: ${extractError.message}`);
+    }
     
-    // Remove ZIP file
-    await fs.unlink(zipPath);
+    // Remove RAR file
+    await fs.unlink(rarPath);
     
     logger.info('Extraction completed');
   } catch (error) {
