@@ -135,10 +135,59 @@ class StorageService {
       throw new Error(`Failed to delete S3 directory: ${error.message}`);
     }
   }
+
+  static async uploadFile(filePath, key, bucket = process.env.AWS_S3_BUCKET_NAME) {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      
+      // Check if file exists
+      if (!fs.existsSync(filePath)) {
+        throw new Error(`File not found: ${filePath}`);
+      }
+
+      // Read file
+      const fileStream = fs.createReadStream(filePath);
+      
+      // Determine content type based on file extension
+      const ext = path.extname(filePath).toLowerCase();
+      let contentType = 'application/octet-stream';
+      
+      if (ext === '.rar') {
+        contentType = 'application/vnd.rar';
+      } else if (ext === '.zip') {
+        contentType = 'application/zip';
+      } else if (ext === '.tar') {
+        contentType = 'application/x-tar';
+      } else if (ext === '.gz') {
+        contentType = 'application/gzip';
+      }
+
+      const params = {
+        Bucket: bucket,
+        Key: key,
+        Body: fileStream,
+        ContentType: contentType
+      };
+
+      const result = await s3.upload(params).promise();
+      logger.info(`File uploaded to S3: ${result.Location}`);
+      
+      // Clean up local file after successful upload
+      fs.unlinkSync(filePath);
+      logger.info(`Local file cleaned up: ${filePath}`);
+      
+      return result;
+    } catch (error) {
+      logger.error('File upload error:', error);
+      throw new Error(`Failed to upload file: ${error.message}`);
+    }
+  }
 }
 
 module.exports = {
   uploadToS3: StorageService.uploadToS3.bind(StorageService),
+  uploadFile: StorageService.uploadFile.bind(StorageService),
   getFromS3: StorageService.getFromS3.bind(StorageService),
   deleteFromS3: StorageService.deleteFromS3.bind(StorageService),
   listS3Objects: StorageService.listS3Objects.bind(StorageService),

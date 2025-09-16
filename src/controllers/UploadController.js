@@ -90,6 +90,7 @@ class UploadController {
 
       console.log('-------------------TenantId:', tenantId);
       console.log('-------------------UserId:', userId);
+      console.log('-------------------req-----------', req.file);
 
       if (!req.file) {
         return res.status(400).json({
@@ -117,7 +118,7 @@ class UploadController {
       // Create build record
       const build = await prisma.build.create({
         data: {
-          tenantId: req.tenant.id,
+          tenantId: req.tenant.tenantId,
           userId: userId,
           version: version,
           status: 'pending',
@@ -131,12 +132,15 @@ class UploadController {
 
       // Upload source file to storage
       const storageKey = `tenants/${tenantId}/builds/${build.id}/source.rar`;
+
+      console.log('-------------------Storage Key:', storageKey);
+
       await storageService.uploadFile(req.file.path, storageKey);
 
       // Add to build queue
       await buildQueue.add('process-build', {
         buildId: build.id,
-        tenantId: req.tenant.id,
+        tenantId: req.tenant.tenantId,
         userId: userId,
         storageKey: storageKey,
         buildConfig: {
@@ -193,7 +197,7 @@ class UploadController {
 
       const [builds, total] = await Promise.all([
         prisma.build.findMany({
-          where: { tenantId: req.tenant.id },
+          where: { tenantId: req.tenant.tenantId },
           include: {
             user: {
               select: { id: true, firstName: true, lastName: true, email: true }
@@ -204,7 +208,7 @@ class UploadController {
           take: limit
         }),
         prisma.build.count({
-          where: { tenantId: req.tenant.id }
+          where: { tenantId: req.tenant.tenantId }
         })
       ]);
 
@@ -253,7 +257,7 @@ class UploadController {
       }
 
       // Verify tenant access
-      if (build.tenantId !== req.tenant.id) {
+      if (build.tenantId !== req.tenant.tenantId) {
         return res.status(403).json({
           error: 'Forbidden',
           message: 'You do not have access to this build'
@@ -291,7 +295,7 @@ class UploadController {
       }
 
       // Verify tenant access
-      if (build.tenantId !== req.tenant.id) {
+      if (build.tenantId !== req.tenant.tenantId) {
         return res.status(403).json({
           error: 'Forbidden',
           message: 'You do not have access to this build'
@@ -321,7 +325,7 @@ class UploadController {
       const storageKey = `tenants/${req.tenant.tenantId}/builds/${build.id}/source.rar`;
       await buildQueue.add('process-build', {
         buildId: build.id,
-        tenantId: req.tenant.id,
+        tenantId: req.tenant.tenantId,
         userId: userId,
         storageKey: storageKey,
         buildConfig: {
