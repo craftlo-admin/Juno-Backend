@@ -308,6 +308,21 @@ try {
   });
 }
 
+// Storage routes
+try {
+  storageRoutes = require('./routes/storageRoutes');
+  logger.info('✅ Storage routes loaded successfully');
+} catch (storageError) {
+  logger.warn('⚠️ Storage routes failed to load (non-critical):', storageError.message);
+  storageRoutes = express.Router();
+  storageRoutes.use('*', (req, res) => {
+    res.status(503).json({
+      error: 'Storage Service Unavailable',
+      message: 'Storage management temporarily unavailable.'
+    });
+  });
+}
+
 // Enhanced health check endpoint
 app.get('/health', async (req, res) => {
   const startTime = Date.now();
@@ -524,6 +539,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/tenants', tenantRoutes);
 app.use('/api/files', fileManagementRoutes); // General file management (projects, uploads, etc.)
 app.use('/api/builds', buildUploadRoutes); // RAR uploads for tenant builds
+app.use('/api/storage', storageRoutes); // S3 storage management and listing
 app.use('/api/projects', projectRoutes);
 
 // API Routes - Advanced features (with graceful degradation)

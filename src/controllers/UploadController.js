@@ -42,10 +42,6 @@ class UploadController {
     try {
       const { userId } = req.user;
 
-      console.log('-------------------Authenticated userId:', userId);
-      console.log('-------------------Prisma object:', typeof prisma);
-      console.log('-------------------TenantMember available:', !!prisma?.tenantMember);
-
       // Find user's first tenant
       const tenantMembership = await prisma.tenantMember.findFirst({
         where: { 
@@ -88,10 +84,6 @@ class UploadController {
       const { tenantId } = req.params;
       const { userId } = req.user;
 
-      console.log('-------------------TenantId:', tenantId);
-      console.log('-------------------UserId:', userId);
-      console.log('-------------------req-----------', req.file);
-
       if (!req.file) {
         return res.status(400).json({
           error: 'No file uploaded',
@@ -133,9 +125,15 @@ class UploadController {
       // Upload source file to storage
       const storageKey = `tenants/${tenantId}/builds/${build.id}/source.rar`;
 
-      console.log('-------------------Storage Key:', storageKey);
+      const uploadResult = await storageService.uploadFile(req.file.path, storageKey);
 
-      await storageService.uploadFile(req.file.path, storageKey);
+      // Add verification logging
+      console.log('✅ S3 Upload Result:', {
+        location: uploadResult.Location,
+        bucket: uploadResult.Bucket,
+        key: uploadResult.Key,
+        etag: uploadResult.ETag
+      });
 
       // Add to build queue
       await buildQueue.add('process-build', {
@@ -160,21 +158,17 @@ class UploadController {
         originalFilename: req.file.originalname
       });
 
+      // Include S3 info in response
       res.status(201).json({
         success: true,
         message: 'File uploaded and build queued successfully',
         data: {
-          build: {
-            id: build.id,
-            tenantId: tenantId,
-            version: build.version,
-            status: build.status,
-            framework: build.framework,
-            sourceFile: req.file.originalname,
-            buildCommand: build.buildCommand,
-            outputDir: build.outputDir,
-            nodeVersion: build.nodeVersion,
-            createdAt: build.createdAt
+          build,
+          s3Upload: {
+            location: uploadResult.Location,
+            bucket: uploadResult.Bucket,
+            key: uploadResult.Key,
+            uploadTime: new Date().toISOString()
           }
         }
       });

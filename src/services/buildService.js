@@ -1,7 +1,7 @@
 const Queue = require('bull');
 const redisClient = require('../config/redis');
 const logger = require('../utils/logger');
-const prisma = require('../lib/prisma');
+const { prisma } = require('../lib/prisma');
 
 /**
  * Multi-tenant Website Builder - Build Service

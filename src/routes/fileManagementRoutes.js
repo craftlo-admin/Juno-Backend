@@ -8,7 +8,7 @@ const rateLimit = require('express-rate-limit');
 const { authenticateToken } = require('../middleware/auth');
 const logger = require('../utils/logger');
 const { uploadToS3, deleteFromS3 } = require('../services/awsService');
-const prisma = require('../lib/prisma');
+const { prisma } = require('../lib/prisma');
 
 /**
  * Multi-tenant Upload Routes

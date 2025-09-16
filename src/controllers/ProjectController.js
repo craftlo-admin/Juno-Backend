@@ -1,5 +1,5 @@
 const logger = require('../utils/logger');
-const prisma = require('../lib/prisma');
+const { prisma } = require('../lib/prisma');
 const BuildService = require('../services/buildService');
 
 /**

@@ -1,5 +1,5 @@
 const { body, validationResult } = require('express-validator');
-const prisma = require('../lib/prisma');
+const { prisma } = require('../lib/prisma');
 const logger = require('../utils/logger');
 const { generateTenantId, generateTenantDomain, isValidTenantId } = require('../utils/tenantUtils');
 

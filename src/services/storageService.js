@@ -54,13 +54,18 @@ class StorageService {
     }
   }
 
-  static async listS3Objects({ bucket, prefix, maxKeys = 1000 }) {
+  static async listS3Objects({ bucket, prefix, maxKeys = 1000, startAfter }) {
     try {
       const params = {
         Bucket: bucket,
         Prefix: prefix,
         MaxKeys: maxKeys
       };
+
+      // Add pagination support
+      if (startAfter) {
+        params.StartAfter = startAfter;
+      }
 
       const result = await s3.listObjectsV2(params).promise();
       return result.Contents || [];
@@ -136,7 +141,7 @@ class StorageService {
     }
   }
 
-  static async uploadFile(filePath, key, bucket = process.env.AWS_S3_BUCKET_NAME) {
+  static async uploadFile(filePath, key, bucket = process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME) {
     try {
       const fs = require('fs');
       const path = require('path');
