@@ -40,7 +40,7 @@ class BuildService {
         data: {
           status,
           ...data,
-          ...(status === 'SUCCESS' || status === 'FAILED' ? { completedAt: new Date() } : {})
+          ...(status === 'SUCCESS' || status === 'FAILED' ? { finishedAt: new Date() } : {})
         }
       });
       
@@ -110,9 +110,8 @@ buildQueue.process('process-build', async (job) => {
         where: { id: buildId },
         data: {
           status: 'success',
-          completedAt: new Date(),
-          artifactsPath: buildResult.artifactsPath,
-          buildLogs: buildResult.logs
+          finishedAt: new Date(),
+          buildPath: buildResult.artifactsPath
         }
       });
 
@@ -149,9 +148,8 @@ buildQueue.process('process-build', async (job) => {
         where: { id: buildId },
         data: {
           status: 'failed',
-          completedAt: new Date(),
-          errorMessage: buildResult.error,
-          buildLogs: buildResult.logs
+          finishedAt: new Date(),
+          errorMessage: buildResult.error
         }
       });
 
@@ -178,7 +176,7 @@ buildQueue.process('process-build', async (job) => {
       where: { id: buildId },
       data: {
         status: 'failed',
-        completedAt: new Date(),
+        finishedAt: new Date(),
         errorMessage: error.message
       }
     });
@@ -473,7 +471,7 @@ async function findProjectDirectory(sourceDir) {
       }
     }
 
-    const error = new Error('No package.json found in extracted files. Please ensure your RAR contains a valid Next.js project.');
+    const error = new Error('No package.json found in extracted files. Please ensure your ZIP contains a valid Next.js project.');
     error.phase = 'validation';
     throw error;
 

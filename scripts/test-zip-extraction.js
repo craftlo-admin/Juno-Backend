@@ -4,7 +4,7 @@ const AdmZip = require('adm-zip');
 
 /**
  * Test ZIP extraction functionality
- * This script tests ZIP file extraction capabilities that replaced RAR processing
+ * This script tests ZIP file extraction capabilities for website deployments
  */
 
 async function testZipExtraction() {

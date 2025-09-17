@@ -37,7 +37,7 @@ const upload = multer({
         'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
         'application/pdf', 'text/plain', 'application/json',
         // Archives (for website uploads)
-        'application/x-rar-compressed', 'application/vnd.rar',
+        'application/zip', 'application/x-zip-compressed',
         'application/x-tar', 'application/gzip'
       ];
 
@@ -71,7 +71,7 @@ const upload = multer({
       const allowedExtensions = [
         '.html', '.css', '.js', '.json', '.txt', '.md',
         '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg',
-        '.pdf', '.rar', '.tar', '.gz'
+        '.pdf', '.zip', '.tar', '.gz'
       ];
 
       if (!allowedExtensions.includes(ext)) {

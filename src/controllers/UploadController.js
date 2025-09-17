@@ -320,9 +320,8 @@ class UploadController {
         data: {
           status: 'pending',
           startedAt: null,
-          completedAt: null,
-          errorMessage: null,
-          buildLogs: null
+          finishedAt: null,
+          errorMessage: null
         }
       });
 
