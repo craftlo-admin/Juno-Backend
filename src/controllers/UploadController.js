@@ -17,12 +17,12 @@ const upload = multer({
     })()
   },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/x-rar-compressed' || 
-        file.mimetype === 'application/vnd.rar' || 
-        file.originalname.endsWith('.rar')) {
+    if (file.mimetype === 'application/zip' || 
+        file.mimetype === 'application/x-zip-compressed' || 
+        file.originalname.endsWith('.zip')) {
       cb(null, true);
     } else {
-      cb(new Error('Only RAR files are allowed'), false);
+      cb(new Error('Only ZIP files are allowed'), false);
     }
   }
 });
@@ -36,7 +36,7 @@ class UploadController {
   ];
 
   /**
-   * Upload RAR file using user's first tenant (auto-tenant detection)
+   * Upload ZIP file using user's first tenant (auto-tenant detection)
    */
   static async uploadFileForUser(req, res, next) {
     try {
@@ -77,7 +77,7 @@ class UploadController {
   }
 
   /**
-   * Upload RAR file and create build job
+   * Upload ZIP file and create build job
    */
   static async uploadFile(req, res, next) {
     try {
@@ -87,7 +87,7 @@ class UploadController {
       if (!req.file) {
         return res.status(400).json({
           error: 'No file uploaded',
-          message: 'Please provide a RAR file'
+          message: 'Please provide a ZIP file'
         });
       }
 
@@ -123,16 +123,27 @@ class UploadController {
       });
 
       // Upload source file to storage
-      const storageKey = `tenants/${tenantId}/builds/${build.id}/source.rar`;
+      const storageKey = `tenants/${tenantId}/builds/${build.id}/source.zip`;
+      const uploadBucket = process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME;
 
-      const uploadResult = await storageService.uploadFile(req.file.path, storageKey);
+      logger.info('Uploading ZIP file to S3', {
+        buildId: build.id,
+        filePath: req.file.path,
+        storageKey: storageKey,
+        bucket: uploadBucket,
+        fileSize: req.file.size,
+        originalName: req.file.originalname
+      });
+
+      const uploadResult = await storageService.uploadFile(req.file.path, storageKey, uploadBucket);
 
       // Add verification logging
       console.log('✅ S3 Upload Result:', {
         location: uploadResult.Location,
         bucket: uploadResult.Bucket,
         key: uploadResult.Key,
-        etag: uploadResult.ETag
+        etag: uploadResult.ETag,
+        size: req.file.size
       });
 
       // Add to build queue
@@ -316,7 +327,7 @@ class UploadController {
       });
 
       // Re-queue the build
-      const storageKey = `tenants/${req.tenant.tenantId}/builds/${build.id}/source.rar`;
+      const storageKey = `tenants/${req.tenant.tenantId}/builds/${build.id}/source.zip`;
       await buildQueue.add('process-build', {
         buildId: build.id,
         tenantId: req.tenant.tenantId,

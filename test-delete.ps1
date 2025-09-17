@@ -4,7 +4,7 @@ $headers = @{
     "Content-Type" = "application/json"
 }
 
-$url = "http://localhost:8000/api/storage/object/himanshubarnwal26_gmail_com-35aebtgz/builds/5a8981e8-0021-41ad-9119-af0381e3da5d/source.rar"
+$url = "http://localhost:8000/api/storage/object/himanshubarnwal26_gmail_com-35aebtgz/builds/5a8981e8-0021-41ad-9119-af0381e3da5d/source.zip"
 
 Write-Host "Testing DELETE: $url"
 

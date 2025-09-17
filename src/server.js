@@ -206,7 +206,7 @@ try {
   });
 }
 
-// Build Upload routes (RAR uploads for tenant builds)
+// Build Upload routes (ZIP uploads for tenant builds)
 let buildUploadRoutes;
 try {
   buildUploadRoutes = require('./routes/buildUploadRoutes');
@@ -318,9 +318,30 @@ try {
   storageRoutes.use('*', (req, res) => {
     res.status(503).json({
       error: 'Storage Service Unavailable',
-      message: 'Storage management temporarily unavailable.'
+      message: 'Storage functionality is temporarily unavailable'
     });
   });
+}
+
+// Test routes (development only)
+let testRoutes;
+if (process.env.NODE_ENV === 'development') {
+  try {
+    testRoutes = require('./routes/testRoutes');
+    logger.info('✅ Test routes loaded successfully');
+  } catch (testError) {
+    logger.warn('⚠️ Test routes failed to load (non-critical):', testError.message);
+    testRoutes = express.Router();
+    testRoutes.use('*', (req, res) => {
+      res.status(503).json({
+        error: 'Test Service Unavailable',
+        message: 'Test functionality is temporarily unavailable'
+      });
+    });
+  }
+} else {
+  // Production: no test routes
+  testRoutes = express.Router();
 }
 
 // Enhanced health check endpoint
@@ -538,7 +559,7 @@ if (process.env.NODE_ENV === 'development') {
 app.use('/api/auth', authRoutes);
 app.use('/api/tenants', tenantRoutes);
 app.use('/api/files', fileManagementRoutes); // General file management (projects, uploads, etc.)
-app.use('/api/builds', buildUploadRoutes); // RAR uploads for tenant builds
+app.use('/api/builds', buildUploadRoutes); // ZIP uploads for tenant builds
 app.use('/api/storage', storageRoutes); // S3 storage management and listing
 app.use('/api/projects', projectRoutes);
 
@@ -547,6 +568,11 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/webhooks', webhooksRoutes);
 app.use('/api/realtime', realtimeRoutes);
 app.use('/api/docs', docsRoutes);
+
+// API Routes - Development only
+if (process.env.NODE_ENV === 'development') {
+  app.use('/api/test', testRoutes);
+}
 
 // Catch-all route for undefined endpoints
 app.use('*', (req, res) => {
@@ -568,7 +594,7 @@ app.use('*', (req, res) => {
       'POST /api/files/single',
       'POST /api/files/multiple', 
       'GET /api/files/list',
-      'POST /api/builds (RAR upload for tenant)',
+      'POST /api/builds (ZIP upload for tenant)',
       'GET /api/builds/:tenantId/list',
       'POST /api/projects',
       'GET /api/projects',

@@ -293,7 +293,7 @@ class StorageController {
         action: 'none'
       };
 
-      if (objectPath.includes('/builds/') && objectPath.endsWith('/source.rar')) {
+      if (objectPath.includes('/builds/') && objectPath.endsWith('/source.zip')) {
         const buildIdMatch = objectPath.match(/builds\/([^\/]+)\/source\.rar$/);
         if (buildIdMatch) {
           const buildId = buildIdMatch[1];

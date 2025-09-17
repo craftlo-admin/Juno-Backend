@@ -4,7 +4,7 @@ const path = require('path');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
-const unrar = require('node-unrar-js');
+const AdmZip = require('adm-zip');
 const redisClient = require('../config/redis');
 const logger = require('../utils/logger');
 const { prisma } = require('../lib/prisma');
@@ -198,8 +198,8 @@ buildQueue.process('process-build', async (job) => {
 });
 
 /**
- * Process build in sandboxed environment with complete RAR processing
- * Downloads RAR from S3, extracts, validates Next.js project, builds and deploys
+ * Process build in sandboxed environment with complete ZIP processing
+ * Downloads ZIP from S3, extracts, validates Next.js project, builds and deploys
  */
 async function processBuild({ buildId, storageKey, buildConfig }) {
   let tempDir = null;
@@ -231,15 +231,15 @@ async function processBuild({ buildId, storageKey, buildConfig }) {
       outputDir
     });
 
-    // 2. Download RAR file from S3
-    const rarFilePath = path.join(tempDir, 'source.rar');
-    logger.info('Downloading RAR from S3', { 
+    // 2. Download ZIP file from S3
+    const zipFilePath = path.join(tempDir, 'source.zip');
+    logger.info('Downloading ZIP from S3', { 
       buildId,
       storageKey, 
-      destination: rarFilePath 
+      destination: zipFilePath 
     });
     
-    // Determine which bucket contains the RAR file (following enhanced storage logic)
+    // Determine which bucket contains the ZIP file (following enhanced storage logic)
     let bucket = process.env.AWS_S3_BUCKET_NAME; // Default
     if (storageKey.includes('/builds/')) {
       bucket = process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME;
@@ -248,18 +248,18 @@ async function processBuild({ buildId, storageKey, buildConfig }) {
     await storageService.downloadFromS3({
       key: storageKey,
       bucket: bucket,
-      localPath: rarFilePath
+      localPath: zipFilePath
     });
 
-    logger.info('RAR file downloaded successfully', { 
+    logger.info('ZIP file downloaded successfully', { 
       buildId,
-      fileSize: (await fs.stat(rarFilePath)).size,
-      filePath: rarFilePath
+      fileSize: (await fs.stat(zipFilePath)).size,
+      filePath: zipFilePath
     });
 
-    // 3. Extract RAR file using node-unrar-js
-    logger.info('Extracting RAR file', { buildId, rarFilePath, extractTo: sourceDir });
-    await extractRarFile(rarFilePath, sourceDir);
+    // 3. Extract ZIP file using adm-zip
+    logger.info('Extracting ZIP file', { buildId, zipFilePath, extractTo: sourceDir });
+    await extractZipFile(zipFilePath, sourceDir);
 
     // 4. Find the actual project directory (handle nested folders)
     const projectDir = await findProjectDirectory(sourceDir);
@@ -388,151 +388,65 @@ async function processBuild({ buildId, storageKey, buildConfig }) {
 }
 
 /**
- * Extract RAR file using node-unrar-js library
+ * Extract ZIP file using adm-zip library
  */
-async function extractRarFile(rarFilePath, extractToDir) {
+async function extractZipFile(zipFilePath, extractToDir) {
   try {
-    logger.info('Starting RAR extraction', { rarFilePath, extractToDir });
+    logger.info('Starting ZIP extraction', { zipFilePath, extractToDir });
     
-    // Read RAR file
-    const rarFileBuffer = await fs.readFile(rarFilePath);
-    
-    // Create extractor from data (this returns a promise that resolves to the actual extractor)
-    const extractor = await unrar.createExtractorFromData({ data: rarFileBuffer });
-    
-    // Get list of files in the archive
-    const list = extractor.getFileList();
-    
-    // Extract fileHeaders object keys (these are the actual files)
-    const fileHeadersObj = list.fileHeaders || {};
-    const fileNames = Object.keys(fileHeadersObj);
-    
-    if (fileNames.length === 0) {
-      const error = new Error('RAR file appears to be empty or contains no extractable files');
-      error.phase = 'extraction';
-      throw error;
+    // Basic file validation
+    const stats = await fs.stat(zipFilePath);
+    if (stats.size === 0) {
+      throw new Error('ZIP file is empty (0 bytes)');
     }
-
-    logger.info('RAR file contents', { 
-      fileCount: fileNames.length,
-      files: fileNames.slice(0, 5) // Log first 5 files
-    });
-
-    // Extract all files - use extract method with file list
-    const extracted = extractor.extract({ files: fileNames });
     
-    // Debug: Check extraction result structure
-    logger.info('Extraction result structure', {
-      extractedType: typeof extracted,
-      extractedKeys: Object.keys(extracted || {}),
-      filesType: typeof extracted?.files,
-      filesLength: Array.isArray(extracted?.files) ? extracted.files.length : 'not an array'
-    });
-    
-    // Process extracted files
-    let extractedCount = 0;
-    
-    if (extracted.files && Array.isArray(extracted.files) && extracted.files.length > 0) {
-      for (const file of extracted.files) {
-        // Handle different file header structures
-        const fileName = file.fileHeader?.name || file.name || file.fileName;
-        
-        if (!fileName) {
-          logger.warn('File without name found, skipping', { file: Object.keys(file) });
-          continue;
-        }
-        
-        if (fileName.endsWith('/') || fileName.endsWith('\\')) {
-          // Directory - create it
-          const dirPath = path.join(extractToDir, fileName);
-          await fs.mkdir(dirPath, { recursive: true });
-          logger.debug('Created directory', { dirPath });
-        } else {
-          // File - write it
-          const filePath = path.join(extractToDir, fileName);
-          const fileDir = path.dirname(filePath);
-          
-          // Ensure directory exists
-          await fs.mkdir(fileDir, { recursive: true });
-          
-          // Write file content
-          const fileContent = file.extraction || file.content || file.data;
-          if (fileContent) {
-            await fs.writeFile(filePath, fileContent);
-            extractedCount++;
-            logger.debug('Extracted file', { 
-              fileName: fileName, 
-              size: fileContent.length 
-            });
-          } else {
-            logger.warn('File without content, skipping', { fileName });
-          }
-        }
-      }
-    } else if (extracted && Object.keys(extracted).length > 0) {
-      // Alternative: If files are directly in the extracted object
-      logger.info('Files found directly in extracted object', { keys: Object.keys(extracted) });
-      
-      for (const [fileName, fileData] of Object.entries(extracted)) {
-        if (fileName === 'files' || typeof fileData !== 'object') continue;
-        
-        const filePath = path.join(extractToDir, fileName);
-        const fileDir = path.dirname(filePath);
-        
-        // Ensure directory exists
-        await fs.mkdir(fileDir, { recursive: true });
-        
-        // Handle different data formats
-        let content = null;
-        if (Buffer.isBuffer(fileData)) {
-          content = fileData;
-        } else if (fileData.extraction) {
-          content = fileData.extraction;
-        } else if (fileData.content) {
-          content = fileData.content;
-        }
-        
-        if (content) {
-          await fs.writeFile(filePath, content);
-          extractedCount++;
-          logger.debug('Extracted file directly', { 
-            fileName: fileName, 
-            size: content.length 
-          });
-        }
-      }
-    } else {
-      // If no files found, log the full structure for debugging
-      logger.error('No files found in extraction result', { 
-        extractedStructure: JSON.stringify(extracted, null, 2).substring(0, 500) + '...',
-        fileHeadersObj: JSON.stringify(fileHeadersObj, null, 2).substring(0, 500) + '...'
-      });
-      throw new Error('RAR extraction failed: No extractable files found');
+    if (stats.size < 22) {
+      throw new Error(`ZIP file too small (${stats.size} bytes) - likely corrupted`);
     }
-
-    logger.info('RAR extraction completed successfully', { 
-      totalFiles: fileNames.length,
-      extractedFiles: extractedCount,
-      extractToDir 
+    
+    // Extract using adm-zip
+    const zip = new AdmZip(zipFilePath);
+    const zipEntries = zip.getEntries();
+    
+    if (zipEntries.length === 0) {
+      throw new Error('ZIP file appears to be empty - no entries found');
+    }
+    
+    logger.info('ZIP file contents', { 
+      zipFilePath,
+      entryCount: zipEntries.length,
+      entries: zipEntries.slice(0, 10).map(entry => ({ 
+        name: entry.entryName, 
+        size: entry.header.size,
+        isDirectory: entry.isDirectory 
+      }))
     });
-
+    
+    // Extract all files
+    zip.extractAllTo(extractToDir, true);
+    
+    // Verify extraction worked
+    const extractedFiles = await fs.readdir(extractToDir);
+    if (extractedFiles.length === 0) {
+      throw new Error('ZIP extraction completed but no files found in output directory');
+    }
+    
+    logger.info('ZIP extraction successful', { 
+      zipFilePath,
+      extractToDir,
+      extractedFileCount: extractedFiles.length,
+      extractedFiles: extractedFiles.slice(0, 10)
+    });
+    
   } catch (error) {
-    logger.error('RAR extraction failed', { 
+    logger.error('ZIP extraction failed', { 
       error: error.message, 
-      rarFilePath,
-      errorType: error.constructor.name,
-      stack: error.stack
+      zipFilePath,
+      extractToDir,
+      errorType: error.constructor.name
     });
     
-    // Provide more specific error information
-    if (error.message.includes('Invalid RAR archive') || error.message.includes('Unexpected end of archive')) {
-      const rarError = new Error('Invalid or corrupted RAR file. Please ensure the uploaded file is a valid RAR archive.');
-      rarError.phase = 'extraction';
-      throw rarError;
-    }
-    
-    error.phase = 'extraction';
-    throw error;
+    throw new Error(`ZIP extraction failed: ${error.message}`);
   }
 }
 

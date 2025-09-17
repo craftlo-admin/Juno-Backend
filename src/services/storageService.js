@@ -158,9 +158,7 @@ class StorageService {
       const ext = path.extname(filePath).toLowerCase();
       let contentType = 'application/octet-stream';
       
-      if (ext === '.rar') {
-        contentType = 'application/vnd.rar';
-      } else if (ext === '.zip') {
+      if (ext === '.zip') {
         contentType = 'application/zip';
       } else if (ext === '.tar') {
         contentType = 'application/x-tar';
