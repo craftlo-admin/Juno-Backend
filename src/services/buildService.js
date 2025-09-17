@@ -1,7 +1,14 @@
 const Queue = require('bull');
+const fs = require('fs').promises;
+const path = require('path');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
+const unrar = require('node-unrar-js');
 const redisClient = require('../config/redis');
 const logger = require('../utils/logger');
 const { prisma } = require('../lib/prisma');
+const storageService = require('./storageService');
 
 /**
  * Multi-tenant Website Builder - Build Service
@@ -78,13 +85,17 @@ buildQueue.process('process-build', async (job) => {
       }
     });
 
-    // Emit progress update via WebSocket
-    const websocketService = require('./websocketService');
-    websocketService.emitToTenant(tenantId, 'build:started', {
-      buildId,
-      status: 'building',
-      message: 'Build process started'
-    });
+    // Emit progress update via WebSocket (optional)
+    try {
+      const websocketService = require('./websocketService');
+      websocketService.emitToTenant(tenantId, 'build:started', {
+        buildId,
+        status: 'building',
+        message: 'Build process started'
+      });
+    } catch (error) {
+      logger.warn('WebSocket service not available:', error.message);
+    }
 
     // Process the build (implement your build logic here)
     const buildResult = await processBuild({
@@ -117,12 +128,18 @@ buildQueue.process('process-build', async (job) => {
         }
       });
 
-      websocketService.emitToTenant(tenantId, 'build:completed', {
-        buildId,
-        status: 'success',
-        deploymentId: deployment.id,
-        url: buildResult.deploymentUrl
-      });
+      // Emit success via WebSocket (optional)
+      try {
+        const websocketService = require('./websocketService');
+        websocketService.emitToTenant(tenantId, 'build:completed', {
+          buildId,
+          status: 'success',
+          deploymentId: deployment.id,
+          url: buildResult.deploymentUrl
+        });
+      } catch (error) {
+        logger.warn('WebSocket service not available for success notification:', error.message);
+      }
 
       logger.info('Build completed successfully', { buildId, deploymentId: deployment.id });
 
@@ -138,11 +155,17 @@ buildQueue.process('process-build', async (job) => {
         }
       });
 
-      websocketService.emitToTenant(tenantId, 'build:failed', {
-        buildId,
-        status: 'failed',
-        error: buildResult.error
-      });
+      // Emit failure via WebSocket (optional)
+      try {
+        const websocketService = require('./websocketService');
+        websocketService.emitToTenant(tenantId, 'build:failed', {
+          buildId,
+          status: 'failed',
+          error: buildResult.error
+        });
+      } catch (error) {
+        logger.warn('WebSocket service not available for failure notification:', error.message);
+      }
 
       logger.error('Build failed', { buildId, error: buildResult.error });
     }
@@ -160,33 +183,577 @@ buildQueue.process('process-build', async (job) => {
       }
     });
 
-    const websocketService = require('./websocketService');
-    websocketService.emitToTenant(tenantId, 'build:failed', {
-      buildId,
-      status: 'failed',
-      error: error.message
-    });
+    // Emit failure via WebSocket (optional)
+    try {
+      const websocketService = require('./websocketService');
+      websocketService.emitToTenant(tenantId, 'build:failed', {
+        buildId,
+        status: 'failed',
+        error: error.message
+      });
+    } catch (wsError) {
+      logger.warn('WebSocket service not available for error notification:', wsError.message);
+    }
   }
 });
 
 /**
- * Process build in sandboxed environment
+ * Process build in sandboxed environment with complete RAR processing
+ * Downloads RAR from S3, extracts, validates Next.js project, builds and deploys
  */
 async function processBuild({ buildId, storageKey, buildConfig }) {
-  // This is a placeholder - implement actual build processing
-  // Should include: download source, extract, install deps, build, upload artifacts
+  let tempDir = null;
+  let sourceDir = null;
+  let outputDir = null;
   
-  return new Promise((resolve) => {
-    // Simulate build process
-    setTimeout(() => {
-      resolve({
-        success: true,
-        artifactsPath: `artifacts/${buildId}`,
-        deploymentUrl: `https://build-${buildId}.example.com`,
-        logs: 'Build completed successfully'
+  try {
+    logger.info('Starting complete build process', { 
+      buildId, 
+      storageKey, 
+      framework: buildConfig?.framework || 'nextjs' 
+    });
+
+    // 1. Create temporary directories for this build
+    const buildWorkspace = path.join(process.cwd(), 'temp', 'builds', buildId);
+    tempDir = path.join(buildWorkspace, 'temp');
+    sourceDir = path.join(buildWorkspace, 'source');
+    outputDir = path.join(buildWorkspace, 'output');
+
+    await fs.mkdir(tempDir, { recursive: true });
+    await fs.mkdir(sourceDir, { recursive: true });
+    await fs.mkdir(outputDir, { recursive: true });
+
+    logger.info('Build workspace created', { 
+      buildId, 
+      buildWorkspace,
+      tempDir,
+      sourceDir,
+      outputDir
+    });
+
+    // 2. Download RAR file from S3
+    const rarFilePath = path.join(tempDir, 'source.rar');
+    logger.info('Downloading RAR from S3', { 
+      buildId,
+      storageKey, 
+      destination: rarFilePath 
+    });
+    
+    // Determine which bucket contains the RAR file (following enhanced storage logic)
+    let bucket = process.env.AWS_S3_BUCKET_NAME; // Default
+    if (storageKey.includes('/builds/')) {
+      bucket = process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME;
+    }
+
+    await storageService.downloadFromS3({
+      key: storageKey,
+      bucket: bucket,
+      localPath: rarFilePath
+    });
+
+    logger.info('RAR file downloaded successfully', { 
+      buildId,
+      fileSize: (await fs.stat(rarFilePath)).size,
+      filePath: rarFilePath
+    });
+
+    // 3. Extract RAR file using node-unrar-js
+    logger.info('Extracting RAR file', { buildId, rarFilePath, extractTo: sourceDir });
+    await extractRarFile(rarFilePath, sourceDir);
+
+    // 4. Find the actual project directory (handle nested folders)
+    const projectDir = await findProjectDirectory(sourceDir);
+    logger.info('Project directory located', { buildId, projectDir });
+
+    // 5. Validate Next.js project structure
+    await validateNextJsProject(projectDir, buildId);
+
+    // 6. Install dependencies
+    logger.info('Installing project dependencies', { buildId, cwd: projectDir });
+    const installResult = await execAsync('npm install --production', { 
+      cwd: projectDir,
+      timeout: 600000, // 10 minutes timeout
+      maxBuffer: 1024 * 1024 * 10 // 10MB buffer
+    });
+    
+    logger.info('Dependencies installed successfully', { 
+      buildId,
+      stdout: installResult.stdout?.substring(0, 500) + '...' // Truncate for logging
+    });
+
+    // 7. Inject tenant-specific environment variables
+    await injectEnvironmentVariables(projectDir, buildId, buildConfig);
+
+    // 8. Build Next.js application
+    logger.info('Building Next.js application', { buildId, cwd: projectDir });
+    const buildResult = await execAsync('npm run build', { 
+      cwd: projectDir,
+      timeout: 900000, // 15 minutes timeout
+      maxBuffer: 1024 * 1024 * 20 // 20MB buffer
+    });
+
+    logger.info('Next.js build completed', { 
+      buildId,
+      stdout: buildResult.stdout?.substring(0, 500) + '...'
+    });
+
+    // 9. Export static files (if Next.js supports static export)
+    let staticExportPath = projectDir;
+    try {
+      logger.info('Attempting static export', { buildId, cwd: projectDir });
+      const exportResult = await execAsync('npx next export', { 
+        cwd: projectDir,
+        timeout: 300000, // 5 minutes timeout
+        maxBuffer: 1024 * 1024 * 10
       });
-    }, 5000);
-  });
+      
+      staticExportPath = path.join(projectDir, 'out');
+      logger.info('Static export successful', { 
+        buildId,
+        staticExportPath,
+        stdout: exportResult.stdout?.substring(0, 500) + '...'
+      });
+    } catch (exportError) {
+      logger.warn('Static export failed, using build output', { 
+        buildId,
+        error: exportError.message,
+        fallbackPath: path.join(projectDir, '.next')
+      });
+      
+      // Use .next build output if static export fails
+      staticExportPath = path.join(projectDir, '.next');
+    }
+
+    // 10. Upload built files to deployment bucket
+    const deploymentPath = `tenants/${buildConfig.tenantId}/deployments/${buildId}`;
+    logger.info('Uploading built files to S3', { 
+      buildId,
+      source: staticExportPath,
+      destination: deploymentPath
+    });
+
+    await uploadDirectoryToS3(staticExportPath, deploymentPath, buildId);
+
+    // 11. Generate deployment URL
+    const deploymentUrl = generateDeploymentUrl(buildConfig.tenantId, buildId);
+
+    // 12. Cleanup temporary files
+    await cleanupBuildWorkspace(buildWorkspace, buildId);
+
+    logger.info('Build process completed successfully', { 
+      buildId,
+      deploymentUrl,
+      artifactsPath: deploymentPath
+    });
+
+    return {
+      success: true,
+      artifactsPath: deploymentPath,
+      deploymentUrl: deploymentUrl,
+      logs: `Build completed successfully. Deployed to: ${deploymentUrl}`,
+      buildStats: {
+        processingTime: Date.now(),
+        deploymentPath: deploymentPath,
+        framework: 'nextjs'
+      }
+    };
+
+  } catch (error) {
+    logger.error('Build process failed', { 
+      buildId,
+      error: error.message,
+      stack: error.stack,
+      phase: error.phase || 'unknown'
+    });
+
+    // Cleanup on failure
+    if (tempDir) {
+      try {
+        await cleanupBuildWorkspace(path.dirname(tempDir), buildId);
+      } catch (cleanupError) {
+        logger.warn('Cleanup failed after build error', { 
+          buildId,
+          cleanupError: cleanupError.message 
+        });
+      }
+    }
+
+    return {
+      success: false,
+      error: error.message,
+      logs: `Build failed: ${error.message}`,
+      phase: error.phase || 'unknown'
+    };
+  }
+}
+
+/**
+ * Extract RAR file using node-unrar-js library
+ */
+async function extractRarFile(rarFilePath, extractToDir) {
+  try {
+    logger.info('Starting RAR extraction', { rarFilePath, extractToDir });
+    
+    // Read RAR file
+    const rarFileBuffer = await fs.readFile(rarFilePath);
+    
+    // Create extractor from data (this returns a promise that resolves to the actual extractor)
+    const extractor = await unrar.createExtractorFromData({ data: rarFileBuffer });
+    
+    // Get list of files in the archive
+    const list = extractor.getFileList();
+    
+    // Extract fileHeaders object keys (these are the actual files)
+    const fileHeadersObj = list.fileHeaders || {};
+    const fileNames = Object.keys(fileHeadersObj);
+    
+    if (fileNames.length === 0) {
+      const error = new Error('RAR file appears to be empty or contains no extractable files');
+      error.phase = 'extraction';
+      throw error;
+    }
+
+    logger.info('RAR file contents', { 
+      fileCount: fileNames.length,
+      files: fileNames.slice(0, 5) // Log first 5 files
+    });
+
+    // Extract all files - use extract method with file list
+    const extracted = extractor.extract({ files: fileNames });
+    
+    // Debug: Check extraction result structure
+    logger.info('Extraction result structure', {
+      extractedType: typeof extracted,
+      extractedKeys: Object.keys(extracted || {}),
+      filesType: typeof extracted?.files,
+      filesLength: Array.isArray(extracted?.files) ? extracted.files.length : 'not an array'
+    });
+    
+    // Process extracted files
+    let extractedCount = 0;
+    
+    if (extracted.files && Array.isArray(extracted.files) && extracted.files.length > 0) {
+      for (const file of extracted.files) {
+        // Handle different file header structures
+        const fileName = file.fileHeader?.name || file.name || file.fileName;
+        
+        if (!fileName) {
+          logger.warn('File without name found, skipping', { file: Object.keys(file) });
+          continue;
+        }
+        
+        if (fileName.endsWith('/') || fileName.endsWith('\\')) {
+          // Directory - create it
+          const dirPath = path.join(extractToDir, fileName);
+          await fs.mkdir(dirPath, { recursive: true });
+          logger.debug('Created directory', { dirPath });
+        } else {
+          // File - write it
+          const filePath = path.join(extractToDir, fileName);
+          const fileDir = path.dirname(filePath);
+          
+          // Ensure directory exists
+          await fs.mkdir(fileDir, { recursive: true });
+          
+          // Write file content
+          const fileContent = file.extraction || file.content || file.data;
+          if (fileContent) {
+            await fs.writeFile(filePath, fileContent);
+            extractedCount++;
+            logger.debug('Extracted file', { 
+              fileName: fileName, 
+              size: fileContent.length 
+            });
+          } else {
+            logger.warn('File without content, skipping', { fileName });
+          }
+        }
+      }
+    } else if (extracted && Object.keys(extracted).length > 0) {
+      // Alternative: If files are directly in the extracted object
+      logger.info('Files found directly in extracted object', { keys: Object.keys(extracted) });
+      
+      for (const [fileName, fileData] of Object.entries(extracted)) {
+        if (fileName === 'files' || typeof fileData !== 'object') continue;
+        
+        const filePath = path.join(extractToDir, fileName);
+        const fileDir = path.dirname(filePath);
+        
+        // Ensure directory exists
+        await fs.mkdir(fileDir, { recursive: true });
+        
+        // Handle different data formats
+        let content = null;
+        if (Buffer.isBuffer(fileData)) {
+          content = fileData;
+        } else if (fileData.extraction) {
+          content = fileData.extraction;
+        } else if (fileData.content) {
+          content = fileData.content;
+        }
+        
+        if (content) {
+          await fs.writeFile(filePath, content);
+          extractedCount++;
+          logger.debug('Extracted file directly', { 
+            fileName: fileName, 
+            size: content.length 
+          });
+        }
+      }
+    } else {
+      // If no files found, log the full structure for debugging
+      logger.error('No files found in extraction result', { 
+        extractedStructure: JSON.stringify(extracted, null, 2).substring(0, 500) + '...',
+        fileHeadersObj: JSON.stringify(fileHeadersObj, null, 2).substring(0, 500) + '...'
+      });
+      throw new Error('RAR extraction failed: No extractable files found');
+    }
+
+    logger.info('RAR extraction completed successfully', { 
+      totalFiles: fileNames.length,
+      extractedFiles: extractedCount,
+      extractToDir 
+    });
+
+  } catch (error) {
+    logger.error('RAR extraction failed', { 
+      error: error.message, 
+      rarFilePath,
+      errorType: error.constructor.name,
+      stack: error.stack
+    });
+    
+    // Provide more specific error information
+    if (error.message.includes('Invalid RAR archive') || error.message.includes('Unexpected end of archive')) {
+      const rarError = new Error('Invalid or corrupted RAR file. Please ensure the uploaded file is a valid RAR archive.');
+      rarError.phase = 'extraction';
+      throw rarError;
+    }
+    
+    error.phase = 'extraction';
+    throw error;
+  }
+}
+
+/**
+ * Find the actual project directory (handle cases where project is in subdirectory)
+ */
+async function findProjectDirectory(sourceDir) {
+  try {
+    // Check if package.json exists in root
+    const rootPackageJson = path.join(sourceDir, 'package.json');
+    if (await fs.access(rootPackageJson).then(() => true).catch(() => false)) {
+      return sourceDir;
+    }
+
+    // Look for package.json in subdirectories
+    const entries = await fs.readdir(sourceDir, { withFileTypes: true });
+    
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const subDirPackageJson = path.join(sourceDir, entry.name, 'package.json');
+        if (await fs.access(subDirPackageJson).then(() => true).catch(() => false)) {
+          return path.join(sourceDir, entry.name);
+        }
+      }
+    }
+
+    const error = new Error('No package.json found in extracted files. Please ensure your RAR contains a valid Next.js project.');
+    error.phase = 'validation';
+    throw error;
+
+  } catch (error) {
+    if (!error.phase) error.phase = 'validation';
+    throw error;
+  }
+}
+
+/**
+ * Validate that the project is a valid Next.js application
+ */
+async function validateNextJsProject(projectDir, buildId) {
+  try {
+    const packageJsonPath = path.join(projectDir, 'package.json');
+    const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf8'));
+    
+    logger.info('Validating Next.js project', { 
+      buildId,
+      projectName: packageJson.name,
+      version: packageJson.version
+    });
+
+    // Check for Next.js dependency
+    const hasNext = packageJson.dependencies?.next || packageJson.devDependencies?.next;
+    if (!hasNext) {
+      const error = new Error('This does not appear to be a Next.js project. Please upload a valid Next.js application with "next" in dependencies.');
+      error.phase = 'validation';
+      throw error;
+    }
+
+    // Check for required scripts
+    const hasRequiredScripts = packageJson.scripts?.build;
+    if (!hasRequiredScripts) {
+      const error = new Error('Missing required "build" script in package.json. Please ensure your Next.js project has proper build scripts.');
+      error.phase = 'validation';
+      throw error;
+    }
+
+    logger.info('Next.js project validation successful', { 
+      buildId,
+      nextVersion: hasNext,
+      scripts: Object.keys(packageJson.scripts || {})
+    });
+
+  } catch (error) {
+    if (!error.phase) error.phase = 'validation';
+    throw error;
+  }
+}
+
+/**
+ * Inject tenant-specific environment variables
+ */
+async function injectEnvironmentVariables(projectDir, buildId, buildConfig) {
+  try {
+    const envPath = path.join(projectDir, '.env.local');
+    const envContent = [
+      `# Auto-generated environment variables for build ${buildId}`,
+      `NEXT_PUBLIC_TENANT_ID=${buildConfig.tenantId}`,
+      `NEXT_PUBLIC_BUILD_ID=${buildId}`,
+      `NEXT_PUBLIC_API_BASE_URL=${process.env.API_BASE_URL || 'http://localhost:8000'}`,
+      `NEXT_PUBLIC_BASE_DOMAIN=${process.env.BASE_DOMAIN || 'localhost'}`,
+      `NEXT_PUBLIC_DEPLOYED_AT=${new Date().toISOString()}`,
+      ''
+    ];
+
+    // Add any custom environment variables from buildConfig
+    if (buildConfig.environmentVariables) {
+      Object.entries(buildConfig.environmentVariables).forEach(([key, value]) => {
+        envContent.push(`${key}=${value}`);
+      });
+    }
+
+    await fs.writeFile(envPath, envContent.join('\n'));
+    
+    logger.info('Environment variables injected', { 
+      buildId,
+      envPath,
+      variableCount: envContent.length - 2 // Exclude comment and empty line
+    });
+
+  } catch (error) {
+    logger.warn('Failed to inject environment variables', { 
+      buildId,
+      error: error.message 
+    });
+    // Don't fail the build for environment variable issues
+  }
+}
+
+/**
+ * Upload directory contents to S3 recursively
+ */
+async function uploadDirectoryToS3(localDir, s3Prefix, buildId) {
+  try {
+    const entries = await fs.readdir(localDir, { withFileTypes: true });
+    const uploadPromises = [];
+
+    for (const entry of entries) {
+      const localPath = path.join(localDir, entry.name);
+      const s3Key = `${s3Prefix}/${entry.name}`;
+
+      if (entry.isDirectory()) {
+        // Recursively upload subdirectory
+        uploadPromises.push(uploadDirectoryToS3(localPath, s3Key, buildId));
+      } else {
+        // Upload file
+        uploadPromises.push(
+          storageService.uploadFile({
+            key: s3Key,
+            bucket: process.env.AWS_S3_BUCKET_STATIC || process.env.AWS_S3_BUCKET_NAME,
+            filePath: localPath,
+            contentType: getContentType(entry.name)
+          })
+        );
+      }
+    }
+
+    await Promise.all(uploadPromises);
+    
+    logger.info('Directory uploaded to S3', { 
+      buildId,
+      localDir,
+      s3Prefix,
+      fileCount: entries.length
+    });
+
+  } catch (error) {
+    logger.error('Failed to upload directory to S3', { 
+      buildId,
+      localDir,
+      s3Prefix,
+      error: error.message 
+    });
+    error.phase = 'upload';
+    throw error;
+  }
+}
+
+/**
+ * Get appropriate content type for file
+ */
+function getContentType(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  const contentTypes = {
+    '.html': 'text/html',
+    '.css': 'text/css',
+    '.js': 'application/javascript',
+    '.json': 'application/json',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.svg': 'image/svg+xml',
+    '.ico': 'image/x-icon',
+    '.woff': 'font/woff',
+    '.woff2': 'font/woff2',
+    '.ttf': 'font/ttf',
+    '.eot': 'application/vnd.ms-fontobject'
+  };
+
+  return contentTypes[ext] || 'application/octet-stream';
+}
+
+/**
+ * Generate deployment URL for the tenant
+ */
+function generateDeploymentUrl(tenantId, buildId) {
+  const baseDomain = process.env.BASE_DOMAIN || 'localhost:8000';
+  
+  if (process.env.NODE_ENV === 'production') {
+    // Production: Use subdomain approach
+    return `https://${tenantId}.${baseDomain}`;
+  } else {
+    // Development: Use path-based approach
+    return `http://${baseDomain}/sites/${tenantId}/${buildId}`;
+  }
+}
+
+/**
+ * Cleanup build workspace to free disk space
+ */
+async function cleanupBuildWorkspace(buildWorkspace, buildId) {
+  try {
+    await fs.rm(buildWorkspace, { recursive: true, force: true });
+    logger.info('Build workspace cleaned up', { buildId, buildWorkspace });
+  } catch (error) {
+    logger.warn('Failed to cleanup build workspace', { 
+      buildId,
+      buildWorkspace,
+      error: error.message 
+    });
+  }
 }
 
 module.exports = {
