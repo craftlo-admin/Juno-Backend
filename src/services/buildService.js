@@ -266,28 +266,65 @@ async function processBuild({ buildId, storageKey, buildConfig }) {
     // 5. Validate Next.js project structure
     await validateNextJsProject(projectDir, buildId);
 
-    // 6. Install dependencies
-    logger.info('Installing project dependencies', { buildId, cwd: projectDir });
-    const installResult = await execAsync('npm install --production', { 
-      cwd: projectDir,
-      timeout: 600000, // 10 minutes timeout
-      maxBuffer: 1024 * 1024 * 10 // 10MB buffer
+    // 6. Force install Tailwind dependencies (no detection, always install)
+    const depCheck = await forceInstallTailwindDependencies(projectDir, buildId);
+    
+    logger.info('📦 Tailwind dependencies force-installed', { 
+      buildId,
+      addedDependencies: depCheck.addedDeps.map(d => `${d.name}@${d.version}`),
+      willInstallDevDependencies: true
+    });
+
+    // 7. Install dependencies (always use full install with Tailwind dependencies)
+    logger.info('Installing project dependencies with Tailwind support', { buildId, cwd: projectDir });
+    
+    logger.info('📦 Installing with dev dependencies (Tailwind force-installed)', { 
+      buildId,
+      addedDependencies: depCheck.addedDeps.map(d => `${d.name}@${d.version}`)
     });
     
-    logger.info('Dependencies installed successfully', { 
+    // First, clean npm cache to avoid any cache issues
+    try {
+      await execAsync('npm cache clean --force', { 
+        cwd: projectDir,
+        timeout: 120000,
+        env: { ...process.env, NODE_ENV: 'development' } // Explicitly set to development
+      });
+      logger.info('✅ npm cache cleaned', { buildId });
+    } catch (error) {
+      logger.warn('⚠️ npm cache clean failed (continuing)', { buildId, error: error.message });
+    }
+    
+    // Install dependencies with explicit flags to include devDependencies
+    const installResult = await execAsync('npm install --include=dev --legacy-peer-deps', { 
+      cwd: projectDir,
+      timeout: 600000, // 10 minutes timeout
+      maxBuffer: 1024 * 1024 * 10, // 10MB buffer
+      env: { 
+        ...process.env, 
+        NODE_ENV: 'development', // Explicitly set to development to ensure devDeps are installed
+        npm_config_production: 'false' // Explicitly disable production mode
+      }
+    });
+    
+    logger.info('Dependencies installed successfully (full install with Tailwind support)', { 
       buildId,
-      stdout: installResult.stdout?.substring(0, 500) + '...' // Truncate for logging
+      stdout: installResult.stdout?.substring(0, 500) + '...'
     });
 
-    // 7. Inject tenant-specific environment variables
+    // 7a. Verify Tailwind dependencies are actually installed
+    await verifyTailwindInstallation(projectDir, buildId);
+
+    // 8. Inject tenant-specific environment variables
     await injectEnvironmentVariables(projectDir, buildId, buildConfig);
 
-    // 8. Build Next.js application
+    // 9. Build Next.js application
     logger.info('Building Next.js application', { buildId, cwd: projectDir });
     const buildResult = await execAsync('npm run build', { 
       cwd: projectDir,
       timeout: 900000, // 15 minutes timeout
-      maxBuffer: 1024 * 1024 * 20 // 20MB buffer
+      maxBuffer: 1024 * 1024 * 20, // 20MB buffer
+      env: { ...process.env, NODE_ENV: 'production' } // Now switch back to production for build
     });
 
     logger.info('Next.js build completed', { 
@@ -295,14 +332,15 @@ async function processBuild({ buildId, storageKey, buildConfig }) {
       stdout: buildResult.stdout?.substring(0, 500) + '...'
     });
 
-    // 9. Export static files (if Next.js supports static export)
+    // 10. Export static files (if Next.js supports static export)
     let staticExportPath = projectDir;
     try {
       logger.info('Attempting static export', { buildId, cwd: projectDir });
       const exportResult = await execAsync('npx next export', { 
         cwd: projectDir,
         timeout: 300000, // 5 minutes timeout
-        maxBuffer: 1024 * 1024 * 10
+        maxBuffer: 1024 * 1024 * 10,
+        env: { ...process.env, NODE_ENV: 'production' }
       });
       
       staticExportPath = path.join(projectDir, 'out');
@@ -322,7 +360,7 @@ async function processBuild({ buildId, storageKey, buildConfig }) {
       staticExportPath = path.join(projectDir, '.next');
     }
 
-    // 10. Upload built files to deployment bucket
+    // 11. Upload built files to deployment bucket
     const deploymentPath = `tenants/${buildConfig.tenantId}/deployments/${buildId}`;
     logger.info('Uploading built files to S3', { 
       buildId,
@@ -332,10 +370,10 @@ async function processBuild({ buildId, storageKey, buildConfig }) {
 
     await uploadDirectoryToS3(staticExportPath, deploymentPath, buildId);
 
-    // 11. Generate deployment URL
+    // 12. Generate deployment URL
     const deploymentUrl = generateDeploymentUrl(buildConfig.tenantId, buildId);
 
-    // 12. Cleanup temporary files
+    // 13. Cleanup temporary files
     await cleanupBuildWorkspace(buildWorkspace, buildId);
 
     logger.info('Build process completed successfully', { 
@@ -410,17 +448,27 @@ async function extractZipFile(zipFilePath, extractToDir) {
       throw new Error('ZIP file appears to be empty - no entries found');
     }
     
-    logger.info('ZIP file contents', { 
+    logger.info('ZIP file contents analysis', { 
       zipFilePath,
-      entryCount: zipEntries.length,
-      entries: zipEntries.slice(0, 10).map(entry => ({ 
-        name: entry.entryName, 
-        size: entry.header.size,
-        isDirectory: entry.isDirectory 
-      }))
+      totalEntries: zipEntries.length,
+      fileSize: `${(stats.size / 1024 / 1024).toFixed(2)} MB`
+    });
+    
+    // Log all ZIP entries for debugging
+    logger.info('📦 Complete ZIP contents:');
+    zipEntries.forEach((entry, index) => {
+      const size = entry.header.size || 0;
+      const compressed = entry.header.compressedSize || 0;
+      logger.info(`   ${index + 1}. ${entry.entryName}`, {
+        isDirectory: entry.isDirectory,
+        originalSize: size,
+        compressedSize: compressed,
+        compressionRatio: size > 0 ? `${((1 - compressed / size) * 100).toFixed(1)}%` : '0%'
+      });
     });
     
     // Extract all files
+    logger.info('🔄 Extracting ZIP contents to:', { extractToDir });
     zip.extractAllTo(extractToDir, true);
     
     // Verify extraction worked
@@ -428,6 +476,11 @@ async function extractZipFile(zipFilePath, extractToDir) {
     if (extractedFiles.length === 0) {
       throw new Error('ZIP extraction completed but no files found in output directory');
     }
+    
+    logger.info('✅ ZIP extraction completed successfully', { 
+      extractedFileCount: extractedFiles.length,
+      extractedFiles: extractedFiles.slice(0, 10) // Show first 10 files
+    });
     
     logger.info('ZIP extraction successful', { 
       zipFilePath,
@@ -453,23 +506,140 @@ async function extractZipFile(zipFilePath, extractToDir) {
  */
 async function findProjectDirectory(sourceDir) {
   try {
-    // Check if package.json exists in root
-    const rootPackageJson = path.join(sourceDir, 'package.json');
-    if (await fs.access(rootPackageJson).then(() => true).catch(() => false)) {
-      return sourceDir;
+    logger.info('🔍 Searching for package.json in extracted files', { sourceDir });
+    
+    // Function to recursively list all files and directories
+    async function listAllFiles(dir, prefix = '') {
+      const files = [];
+      try {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name);
+          const relativePath = prefix + entry.name;
+          
+          if (entry.isDirectory()) {
+            files.push(`📁 ${relativePath}/`);
+            // Recursively list subdirectory contents (limit depth to avoid spam)
+            if (prefix.split('/').length < 3) {
+              const subFiles = await listAllFiles(fullPath, relativePath + '/');
+              files.push(...subFiles);
+            }
+          } else {
+            files.push(`📄 ${relativePath} (${entry.isFile() ? 'file' : 'unknown'})`);
+          }
+        }
+      } catch (error) {
+        files.push(`❌ Error reading directory ${dir}: ${error.message}`);
+      }
+      return files;
     }
 
-    // Look for package.json in subdirectories
-    const entries = await fs.readdir(sourceDir, { withFileTypes: true });
+    // Log all extracted files
+    logger.info('📋 Listing all extracted files and directories:');
+    const allFiles = await listAllFiles(sourceDir);
+    allFiles.forEach((file, index) => {
+      logger.info(`   ${index + 1}. ${file}`);
+    });
     
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        const subDirPackageJson = path.join(sourceDir, entry.name, 'package.json');
-        if (await fs.access(subDirPackageJson).then(() => true).catch(() => false)) {
-          return path.join(sourceDir, entry.name);
+    // Check if package.json exists in root
+    logger.info('🔍 Checking for package.json in root directory', { rootDir: sourceDir });
+    const rootPackageJson = path.join(sourceDir, 'package.json');
+    
+    try {
+      await fs.access(rootPackageJson);
+      logger.info('✅ Found package.json in root directory', { packageJsonPath: rootPackageJson });
+      return sourceDir;
+    } catch (error) {
+      logger.info('❌ No package.json found in root directory', { 
+        rootDir: sourceDir,
+        error: error.message 
+      });
+    }
+
+    // Look for package.json in subdirectories (recursive search)
+    logger.info('🔍 Searching for package.json in subdirectories...');
+    
+    async function searchForPackageJson(searchDir, depth = 0) {
+      if (depth > 3) {
+        logger.warn(`⚠️ Skipping deeper search (depth ${depth}) in ${searchDir}`);
+        return null;
+      }
+      
+      try {
+        const entries = await fs.readdir(searchDir, { withFileTypes: true });
+        
+        // First, check for package.json in current directory
+        for (const entry of entries) {
+          if (entry.name === 'package.json' && entry.isFile()) {
+            const packageJsonPath = path.join(searchDir, entry.name);
+            
+            // Verify the package.json is readable and valid
+            try {
+              const packageJsonContent = await fs.readFile(packageJsonPath, 'utf8');
+              const packageData = JSON.parse(packageJsonContent);
+              
+              logger.info('✅ Found and validated package.json!', { 
+                directory: path.relative(sourceDir, searchDir) || 'root',
+                fullPath: packageJsonPath,
+                projectName: packageData.name || 'Unknown',
+                hasNextJs: !!(packageData.dependencies?.next || packageData.devDependencies?.next),
+                hasReact: !!(packageData.dependencies?.react || packageData.devDependencies?.react)
+              });
+              
+              return searchDir;
+            } catch (parseError) {
+              logger.warn('⚠️ Found package.json but cannot parse it:', { 
+                packageJsonPath,
+                error: parseError.message 
+              });
+              // Continue searching instead of failing
+            }
+          }
         }
+        
+        // Then search in subdirectories
+        for (const entry of entries) {
+          if (entry.isDirectory()) {
+            const subDir = path.join(searchDir, entry.name);
+            const relativePath = path.relative(sourceDir, subDir);
+            
+            logger.info(`🔍 Checking ${depth === 0 ? 'subdirectory' : 'nested directory'}: ${entry.name}`, { 
+              fullPath: subDir,
+              relativePath: relativePath,
+              depth: depth
+            });
+            
+            const result = await searchForPackageJson(subDir, depth + 1);
+            if (result) {
+              return result;
+            }
+          }
+        }
+        
+        return null;
+      } catch (error) {
+        logger.warn(`❌ Error searching directory ${searchDir}:`, { error: error.message });
+        return null;
       }
     }
+    
+    const foundProjectDir = await searchForPackageJson(sourceDir);
+    
+    if (foundProjectDir) {
+      logger.info('🎯 Project directory found!', { 
+        projectDir: foundProjectDir,
+        relativePath: path.relative(sourceDir, foundProjectDir) || 'root'
+      });
+      return foundProjectDir;
+    }
+
+    // Enhanced error with detailed file listing
+    logger.error('❌ No package.json found anywhere in extracted ZIP', {
+      sourceDir,
+      extractedFiles: allFiles.slice(0, 20), // Show first 20 files
+      totalFiles: allFiles.length
+    });
 
     const error = new Error('No package.json found in extracted files. Please ensure your ZIP contains a valid Next.js project.');
     error.phase = 'validation';
@@ -665,6 +835,207 @@ async function cleanupBuildWorkspace(buildWorkspace, buildId) {
       buildWorkspace,
       error: error.message 
     });
+  }
+}
+
+/**
+ * Force install Tailwind dependencies - no detection, always add them
+ * Ensures Tailwind CSS is always available for builds
+ */
+async function forceInstallTailwindDependencies(projectDir, buildId) {
+  try {
+    logger.info('� Force-installing Tailwind dependencies', { buildId, projectDir });
+
+    const packageJsonPath = path.join(projectDir, 'package.json');
+    const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf8'));
+    
+    const tailwindDeps = {
+      'tailwindcss': '^3.4.17',
+      'autoprefixer': '^10.4.21',
+      'postcss': '^8.5.6'
+    };
+
+    const addedDeps = [];
+
+    // Always ensure Tailwind dependencies are in devDependencies with correct versions
+    if (!packageJson.devDependencies) packageJson.devDependencies = {};
+    
+    for (const [dep, version] of Object.entries(tailwindDeps)) {
+      // Update version regardless of whether it exists
+      packageJson.devDependencies[dep] = version;
+      addedDeps.push({ name: dep, version });
+      logger.info(`📦 Force-added/updated dependency: ${dep}@${version}`, { buildId });
+    }
+
+    // Also ensure they're NOT in regular dependencies to avoid conflicts
+    if (packageJson.dependencies) {
+      for (const dep of Object.keys(tailwindDeps)) {
+        if (packageJson.dependencies[dep]) {
+          logger.info(`📦 Moving ${dep} from dependencies to devDependencies`, { buildId });
+          delete packageJson.dependencies[dep];
+        }
+      }
+    }
+
+    // Always update package.json
+    await fs.writeFile(packageJsonPath, JSON.stringify(packageJson, null, 2));
+    
+    logger.info('✅ Tailwind dependencies force-installed to package.json', { 
+      buildId,
+      addedDependencies: addedDeps.map(d => `${d.name}@${d.version}`)
+    });
+
+    return { addedDeps };
+
+  } catch (error) {
+    logger.warn('⚠️ Failed to force-install Tailwind dependencies', { 
+      buildId,
+      error: error.message 
+    });
+    // Return empty array if failed
+    return { addedDeps: [] };
+  }
+}
+
+/**
+ * Verify that Tailwind dependencies are actually installed in node_modules
+ */
+async function verifyTailwindInstallation(projectDir, buildId) {
+  try {
+    logger.info('🔍 Verifying Tailwind installation in node_modules', { buildId });
+
+    const tailwindDeps = ['tailwindcss', 'autoprefixer', 'postcss'];
+    const nodeModulesPath = path.join(projectDir, 'node_modules');
+    
+    // Check if node_modules exists
+    try {
+      await fs.access(nodeModulesPath);
+      logger.info('✅ node_modules directory exists', { buildId, nodeModulesPath });
+    } catch (error) {
+      logger.error('❌ node_modules directory not found', { buildId, nodeModulesPath });
+      throw new Error('node_modules directory not found after installation');
+    }
+
+    // Check each Tailwind dependency
+    for (const dep of tailwindDeps) {
+      const depPath = path.join(nodeModulesPath, dep);
+      try {
+        await fs.access(depPath);
+        const packageJsonPath = path.join(depPath, 'package.json');
+        const depPackageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf8'));
+        
+        logger.info(`✅ ${dep} installed successfully`, { 
+          buildId,
+          version: depPackageJson.version,
+          path: depPath
+        });
+      } catch (error) {
+        logger.error(`❌ ${dep} not found in node_modules`, { 
+          buildId,
+          expectedPath: depPath,
+          error: error.message
+        });
+        
+        // Try to reinstall the specific missing package
+        logger.info(`🔄 Attempting to reinstall ${dep}`, { buildId });
+        await execAsync(`npm install ${dep} --legacy-peer-deps --include=dev`, { 
+          cwd: projectDir,
+          timeout: 300000,
+          maxBuffer: 1024 * 1024 * 5,
+          env: { 
+            ...process.env, 
+            NODE_ENV: 'development',
+            npm_config_production: 'false'
+          }
+        });
+        
+        // Verify the reinstall worked
+        try {
+          await fs.access(depPath);
+          logger.info(`✅ ${dep} reinstalled successfully`, { buildId });
+        } catch (verifyError) {
+          logger.error(`❌ ${dep} reinstall failed - still not found`, { 
+            buildId,
+            error: verifyError.message
+          });
+        }
+      }
+    }
+
+    // List some contents of node_modules for debugging
+    try {
+      const nodeModulesContents = await fs.readdir(nodeModulesPath);
+      logger.info('📦 node_modules contents (first 20 packages)', { 
+        buildId,
+        totalPackages: nodeModulesContents.length,
+        packages: nodeModulesContents.slice(0, 20)
+      });
+    } catch (error) {
+      logger.warn('⚠️ Could not list node_modules contents', { buildId, error: error.message });
+    }
+
+    logger.info('✅ Tailwind installation verification completed', { buildId });
+
+  } catch (error) {
+    logger.error('❌ Tailwind installation verification failed', { 
+      buildId,
+      error: error.message 
+    });
+    // Don't fail the build, just warn
+  }
+}
+
+/**
+ * Detect if project uses Tailwind CSS by scanning existing files
+ */
+async function detectTailwindUsage(projectDir, buildId) {
+  try {
+    // Check CSS files for Tailwind directives
+    const cssFiles = [
+      'app/globals.css',
+      'styles/globals.css', 
+      'src/styles/globals.css',
+      'globals.css'
+    ];
+    
+    for (const cssFile of cssFiles) {
+      const cssPath = path.join(projectDir, cssFile);
+      try {
+        const cssContent = await fs.readFile(cssPath, 'utf8');
+        
+        // Look for Tailwind directives
+        const hasTailwindDirectives = cssContent.includes('@tailwind base') || 
+                                     cssContent.includes('@tailwind components') || 
+                                     cssContent.includes('@tailwind utilities') ||
+                                     cssContent.includes('tailwindcss');
+        
+        if (hasTailwindDirectives) {
+          logger.info('🎨 Tailwind directives found in CSS file', { 
+            buildId,
+            cssFile,
+            filePath: cssPath
+          });
+          return true;
+        }
+      } catch (error) {
+        // File doesn't exist, continue checking
+      }
+    }
+
+    // Check for existing tailwind.config.js
+    const tailwindConfigPath = path.join(projectDir, 'tailwind.config.js');
+    try {
+      await fs.access(tailwindConfigPath);
+      logger.info('🎨 Existing tailwind.config.js found', { buildId, configPath: tailwindConfigPath });
+      return true;
+    } catch (error) {
+      // No tailwind config found
+    }
+
+    return false;
+  } catch (error) {
+    logger.warn('⚠️ Error detecting Tailwind usage', { buildId, error: error.message });
+    return false;
   }
 }
 
