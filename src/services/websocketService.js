@@ -243,6 +243,18 @@ class WebSocketService {
     }
   }
 
+  // Alias method for backward compatibility with build service
+  emitToTenant(tenantId, event, data) {
+    if (this.io) {
+      this.io.to(`tenant:${tenantId}`).emit(event, {
+        ...data,
+        timestamp: new Date().toISOString()
+      });
+      
+      logger.info(`Emitted ${event} to tenant ${tenantId}:`, data);
+    }
+  }
+
   // Get connection stats
   getConnectionStats() {
     return {

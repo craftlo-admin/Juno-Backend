@@ -13,7 +13,7 @@ class StorageService {
       };
 
       const result = await s3.upload(params).promise();
-      logger.info(`File uploaded to S3: ${result.Location}`);
+      logger.debug(`File uploaded to S3: ${result.Location}`);
       return result;
     } catch (error) {
       logger.error('S3 upload error:', error);
@@ -141,10 +141,25 @@ class StorageService {
     }
   }
 
-  static async uploadFile(filePath, key, bucket = process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME) {
+  static async uploadFile({ filePath, key, bucket, contentType }) {
     try {
       const fs = require('fs');
       const path = require('path');
+      
+      // Validate required parameters
+      if (!filePath) {
+        throw new Error('filePath parameter is required');
+      }
+      if (!key) {
+        throw new Error('key parameter is required');
+      }
+      
+      // Use provided bucket or default
+      const targetBucket = bucket || process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME;
+      
+      if (!targetBucket) {
+        throw new Error('No S3 bucket specified and no default bucket configured');
+      }
       
       // Check if file exists
       if (!fs.existsSync(filePath)) {
@@ -154,37 +169,53 @@ class StorageService {
       // Read file
       const fileStream = fs.createReadStream(filePath);
       
-      // Determine content type based on file extension
-      const ext = path.extname(filePath).toLowerCase();
-      let contentType = 'application/octet-stream';
-      
-      if (ext === '.zip') {
-        contentType = 'application/zip';
-      } else if (ext === '.tar') {
-        contentType = 'application/x-tar';
-      } else if (ext === '.gz') {
-        contentType = 'application/gzip';
+      // Use provided content type or determine from file extension
+      let finalContentType = contentType;
+      if (!finalContentType) {
+        const ext = path.extname(filePath).toLowerCase();
+        finalContentType = getContentTypeFromExtension(ext);
       }
 
       const params = {
-        Bucket: bucket,
+        Bucket: targetBucket,
         Key: key,
         Body: fileStream,
-        ContentType: contentType
+        ContentType: finalContentType
       };
 
       const result = await s3.upload(params).promise();
-      logger.info(`File uploaded to S3: ${result.Location}`);
-      
-      // Clean up local file after successful upload
-      fs.unlinkSync(filePath);
-      logger.info(`Local file cleaned up: ${filePath}`);
+      logger.debug(`File uploaded to S3: ${result.Location}`);
       
       return result;
     } catch (error) {
       logger.error('File upload error:', error);
       throw new Error(`Failed to upload file: ${error.message}`);
     }
+  }
+
+  // Helper function to determine content type from extension
+  static getContentTypeFromExtension(ext) {
+    const contentTypes = {
+      '.html': 'text/html',
+      '.css': 'text/css',
+      '.js': 'application/javascript',
+      '.json': 'application/json',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.svg': 'image/svg+xml',
+      '.ico': 'image/x-icon',
+      '.woff': 'font/woff',
+      '.woff2': 'font/woff2',
+      '.ttf': 'font/ttf',
+      '.eot': 'application/vnd.ms-fontobject',
+      '.zip': 'application/zip',
+      '.tar': 'application/x-tar',
+      '.gz': 'application/gzip'
+    };
+    
+    return contentTypes[ext] || 'application/octet-stream';
   }
 
   static async downloadFromS3({ key, bucket, localPath }) {
@@ -235,6 +266,7 @@ class StorageService {
 module.exports = {
   uploadToS3: StorageService.uploadToS3.bind(StorageService),
   uploadFile: StorageService.uploadFile.bind(StorageService),
+  getContentTypeFromExtension: StorageService.getContentTypeFromExtension.bind(StorageService),
   getFromS3: StorageService.getFromS3.bind(StorageService),
   downloadFromS3: StorageService.downloadFromS3.bind(StorageService),
   deleteFromS3: StorageService.deleteFromS3.bind(StorageService),

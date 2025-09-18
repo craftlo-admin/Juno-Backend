@@ -9,6 +9,7 @@ const redisClient = require('../config/redis');
 const logger = require('../utils/logger');
 const { prisma } = require('../lib/prisma');
 const storageService = require('./storageService');
+const deploymentService = require('./deploymentService');
 
 /**
  * Multi-tenant Website Builder - Build Service
@@ -71,9 +72,38 @@ const buildQueue = new Queue('build processing', {
 
 // Build queue processor
 buildQueue.process('process-build', async (job) => {
-  const { buildId, tenantId, userId, storageKey, buildConfig } = job.data;
-
+  let buildId, tenantId, userId, storageKey, buildConfig;
+  
   try {
+    // Validate job data exists
+    if (!job || !job.data) {
+      throw new Error('Invalid job: missing job data');
+    }
+
+    // Log job data for debugging
+    logger.debug('Job data received:', { 
+      jobData: job.data,
+      hasJobData: !!job.data,
+      jobKeys: job.data ? Object.keys(job.data) : 'none'
+    });
+
+    // Extract job data with validation
+    ({ buildId, tenantId, userId, storageKey, buildConfig } = job.data);
+    
+    // Validate each required field individually
+    if (!buildId) {
+      throw new Error('Missing required field: buildId');
+    }
+    if (!tenantId) {
+      throw new Error('Missing required field: tenantId');
+    }
+    if (!userId) {
+      throw new Error('Missing required field: userId');
+    }
+    if (!storageKey) {
+      throw new Error('Missing required field: storageKey');
+    }
+
     logger.info('Starting build process', { buildId, tenantId });
 
     // Update build status to building
@@ -100,6 +130,7 @@ buildQueue.process('process-build', async (job) => {
     // Process the build (implement your build logic here)
     const buildResult = await processBuild({
       buildId,
+      tenantId,
       storageKey,
       buildConfig
     });
@@ -119,11 +150,11 @@ buildQueue.process('process-build', async (job) => {
       const deployment = await prisma.deployment.create({
         data: {
           tenantId: tenantId,
-          userId: userId,
           buildId: buildId,
           version: `deploy-${Date.now()}`,
           status: 'pending',
-          url: buildResult.deploymentUrl
+          deployer: `user-${userId}`, // Store user info in deployer field
+          notes: `Automated deployment for build ${buildId}`
         }
       });
 
@@ -171,27 +202,63 @@ buildQueue.process('process-build', async (job) => {
   } catch (error) {
     logger.error('Build process error:', error);
 
-    // Update build status to failed
-    await prisma.build.update({
-      where: { id: buildId },
-      data: {
-        status: 'failed',
-        finishedAt: new Date(),
-        errorMessage: error.message
+    // Update build status to failed (if we have a buildId)
+    if (buildId) {
+      try {
+        await prisma.build.update({
+          where: { id: buildId },
+          data: {
+            status: 'failed',
+            finishedAt: new Date(),
+            errorMessage: error.message
+          }
+        });
+      } catch (buildUpdateError) {
+        logger.error('Failed to update build status to failed', { 
+          buildId, 
+          error: buildUpdateError.message 
+        });
       }
-    });
-
-    // Emit failure via WebSocket (optional)
-    try {
-      const websocketService = require('./websocketService');
-      websocketService.emitToTenant(tenantId, 'build:failed', {
-        buildId,
-        status: 'failed',
-        error: error.message
-      });
-    } catch (wsError) {
-      logger.warn('WebSocket service not available for error notification:', wsError.message);
     }
+
+    // Update deployment status to failed (if we have both buildId and tenantId)
+    if (buildId && tenantId) {
+      try {
+        await prisma.deployment.updateMany({
+          where: {
+            buildId: buildId,
+            tenantId: tenantId,
+            status: 'pending'
+          },
+          data: {
+            status: 'failed',
+            notes: `Deployment failed: ${error.message}`
+          }
+        });
+      } catch (deploymentUpdateError) {
+        logger.warn('Failed to update deployment status to failed', { 
+          buildId, 
+          error: deploymentUpdateError.message 
+        });
+      }
+    }
+
+    // Emit failure via WebSocket (if we have tenantId)
+    if (tenantId) {
+      try {
+        const websocketService = require('./websocketService');
+        websocketService.emitToTenant(tenantId, 'build:failed', {
+          buildId,
+          status: 'failed',
+          error: error.message
+        });
+      } catch (wsError) {
+        logger.warn('WebSocket service not available for error notification:', wsError.message);
+      }
+    }
+
+    // Re-throw the error for the queue to handle
+    throw error;
   }
 });
 
@@ -199,14 +266,26 @@ buildQueue.process('process-build', async (job) => {
  * Process build in sandboxed environment with complete ZIP processing
  * Downloads ZIP from S3, extracts, validates Next.js project, builds and deploys
  */
-async function processBuild({ buildId, storageKey, buildConfig }) {
+async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
   let tempDir = null;
   let sourceDir = null;
   let outputDir = null;
   
   try {
+    // Validate required parameters
+    if (!buildId) {
+      throw new Error('buildId is required for processBuild');
+    }
+    if (!tenantId) {
+      throw new Error('tenantId is required for processBuild');
+    }
+    if (!storageKey) {
+      throw new Error('storageKey is required for processBuild');
+    }
+
     logger.info('Starting complete build process', { 
       buildId, 
+      tenantId,
       storageKey, 
       framework: buildConfig?.framework || 'nextjs' 
     });
@@ -316,7 +395,7 @@ async function processBuild({ buildId, storageKey, buildConfig }) {
     await verifyTailwindInstallation(projectDir, buildId);
 
     // 8. Inject tenant-specific environment variables
-    await injectEnvironmentVariables(projectDir, buildId, buildConfig);
+    await injectEnvironmentVariables(projectDir, buildId, buildConfig, tenantId);
 
     // 9. Build Next.js application
     logger.info('Building Next.js application', { buildId, cwd: projectDir });
@@ -360,20 +439,80 @@ async function processBuild({ buildId, storageKey, buildConfig }) {
       staticExportPath = path.join(projectDir, '.next');
     }
 
+    // Validate that the static export path exists and contains files
+    staticExportPath = await validateStaticExportPath(staticExportPath, buildId);
+
     // 11. Upload built files to deployment bucket
-    const deploymentPath = `tenants/${buildConfig.tenantId}/deployments/${buildId}`;
+    const deploymentPath = `tenants/${tenantId}/deployments/${buildId}`;
     logger.info('Uploading built files to S3', { 
       buildId,
+      tenantId,
       source: staticExportPath,
       destination: deploymentPath
     });
 
     await uploadDirectoryToS3(staticExportPath, deploymentPath, buildId);
 
-    // 12. Generate deployment URL
-    const deploymentUrl = generateDeploymentUrl(buildConfig.tenantId, buildId);
+    // 12. Update CloudFront deployment pointers and invalidate cache
+    let cloudfrontInvalidationId = null;
+    try {
+      logger.info('Updating CloudFront deployment', { buildId, tenantId });
+      
+      // Update version pointer for CloudFront routing
+      await deploymentService.updateVersionPointer(tenantId, buildId);
+      
+      // Invalidate CloudFront cache to ensure immediate deployment
+      cloudfrontInvalidationId = await deploymentService.invalidateCloudFrontCache(tenantId);
+      
+      logger.info('CloudFront deployment completed', { 
+        buildId,
+        tenantId,
+        invalidationId: cloudfrontInvalidationId 
+      });
+    } catch (cloudFrontError) {
+      // Don't fail the build for CloudFront issues, but log the error
+      logger.warn('CloudFront deployment failed (build will continue)', { 
+        buildId,
+        error: cloudFrontError.message 
+      });
+    }
 
-    // 13. Cleanup temporary files
+    // 13. Generate deployment URL
+    const deploymentUrl = generateDeploymentUrl(tenantId, buildId);
+
+    // 14. Update deployment status to active
+    try {
+      const updateData = {
+        status: 'active',
+        notes: `Deployment completed successfully. URL: ${deploymentUrl}`
+      };
+      
+      // Add CloudFront invalidation ID if available
+      if (cloudfrontInvalidationId) {
+        updateData.cloudfrontInvalidationId = cloudfrontInvalidationId;
+      }
+      
+      await prisma.deployment.updateMany({
+        where: {
+          buildId: buildId,
+          tenantId: tenantId
+        },
+        data: updateData
+      });
+      
+      logger.info('Deployment status updated to active', { 
+        buildId, 
+        deploymentUrl,
+        cloudfrontInvalidationId 
+      });
+    } catch (deploymentUpdateError) {
+      logger.warn('Failed to update deployment status', { 
+        buildId, 
+        error: deploymentUpdateError.message 
+      });
+    }
+
+    // 15. Cleanup temporary files
     await cleanupBuildWorkspace(buildWorkspace, buildId);
 
     logger.info('Build process completed successfully', { 
@@ -696,12 +835,16 @@ async function validateNextJsProject(projectDir, buildId) {
 /**
  * Inject tenant-specific environment variables
  */
-async function injectEnvironmentVariables(projectDir, buildId, buildConfig) {
+async function injectEnvironmentVariables(projectDir, buildId, buildConfig, tenantId) {
   try {
+    if (!tenantId) {
+      throw new Error('tenantId parameter is undefined in injectEnvironmentVariables');
+    }
+
     const envPath = path.join(projectDir, '.env.local');
     const envContent = [
       `# Auto-generated environment variables for build ${buildId}`,
-      `NEXT_PUBLIC_TENANT_ID=${buildConfig.tenantId}`,
+      `NEXT_PUBLIC_TENANT_ID=${tenantId}`,
       `NEXT_PUBLIC_BUILD_ID=${buildId}`,
       `NEXT_PUBLIC_API_BASE_URL=${process.env.API_BASE_URL || 'http://localhost:8000'}`,
       `NEXT_PUBLIC_BASE_DOMAIN=${process.env.BASE_DOMAIN || 'localhost'}`,
@@ -734,44 +877,87 @@ async function injectEnvironmentVariables(projectDir, buildId, buildConfig) {
 }
 
 /**
- * Upload directory contents to S3 recursively
+ * Upload directory contents to S3 recursively with enhanced error handling
  */
-async function uploadDirectoryToS3(localDir, s3Prefix, buildId) {
+async function uploadDirectoryToS3(localDir, s3Prefix, buildId, isRootCall = true) {
   try {
+    if (isRootCall) {
+      logger.info('📤 Starting S3 upload process', { buildId, localDir, s3Prefix });
+    }
+
     const entries = await fs.readdir(localDir, { withFileTypes: true });
     const uploadPromises = [];
+    let totalFiles = 0;
+    let totalDirs = 0;
 
     for (const entry of entries) {
       const localPath = path.join(localDir, entry.name);
       const s3Key = `${s3Prefix}/${entry.name}`;
 
       if (entry.isDirectory()) {
-        // Recursively upload subdirectory
-        uploadPromises.push(uploadDirectoryToS3(localPath, s3Key, buildId));
+        totalDirs++;
+        // Recursively upload subdirectory (mark as non-root call)
+        uploadPromises.push(uploadDirectoryToS3(localPath, s3Key, buildId, false));
       } else {
-        // Upload file
+        totalFiles++;
+        // Upload file with enhanced error handling
         uploadPromises.push(
-          storageService.uploadFile({
+          uploadFileWithRetry({
             key: s3Key,
             bucket: process.env.AWS_S3_BUCKET_STATIC || process.env.AWS_S3_BUCKET_NAME,
             filePath: localPath,
             contentType: getContentType(entry.name)
-          })
+          }, buildId, 3) // 3 retry attempts
         );
       }
     }
 
-    await Promise.all(uploadPromises);
+    if (isRootCall && uploadPromises.length > 0) {
+      logger.info('📊 Upload batch prepared', { 
+        buildId,
+        totalFiles,
+        totalDirs,
+        totalPromises: uploadPromises.length
+      });
+    }
+
+    // Process uploads with error collection and progress tracking
+    const results = await Promise.allSettled(uploadPromises);
     
-    logger.info('Directory uploaded to S3', { 
-      buildId,
-      localDir,
-      s3Prefix,
-      fileCount: entries.length
-    });
+    // Analyze results
+    const successful = results.filter(r => r.status === 'fulfilled').length;
+    const failed = results.filter(r => r.status === 'rejected');
+    
+    if (failed.length > 0) {
+      logger.error('❌ Some uploads failed', {
+        buildId,
+        successful,
+        failed: failed.length,
+        failureReasons: failed.slice(0, 3).map(f => f.reason?.message || 'Unknown error') // Limit to first 3 errors
+      });
+      
+      // If more than 20% of uploads failed, throw an error
+      if (failed.length / results.length > 0.2) {
+        throw new Error(`Upload failure rate too high: ${failed.length}/${results.length} failed`);
+      }
+    }
+    
+    // Only log completion for root-level call
+    if (isRootCall) {
+      logger.info('✅ Directory upload completed', { 
+        buildId,
+        localDir,
+        s3Prefix,
+        totalUploaded: successful,
+        failedUploads: failed.length,
+        directories: totalDirs,
+        files: totalFiles,
+        successRate: `${Math.round((successful / (successful + failed.length)) * 100)}%`
+      });
+    }
 
   } catch (error) {
-    logger.error('Failed to upload directory to S3', { 
+    logger.error('❌ Failed to upload directory to S3', { 
       buildId,
       localDir,
       s3Prefix,
@@ -783,28 +969,56 @@ async function uploadDirectoryToS3(localDir, s3Prefix, buildId) {
 }
 
 /**
- * Get appropriate content type for file
+ * Upload single file with retry logic
+ */
+async function uploadFileWithRetry(uploadParams, buildId, maxRetries = 3) {
+  let lastError;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await storageService.uploadFile(uploadParams);
+      
+      if (attempt > 1) {
+        logger.info(`✅ File upload succeeded on attempt ${attempt}`, {
+          buildId,
+          key: uploadParams.key,
+          attempt
+        });
+      }
+      
+      return result;
+    } catch (error) {
+      lastError = error;
+      
+      if (attempt < maxRetries) {
+        const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
+        logger.warn(`⚠️ File upload attempt ${attempt} failed, retrying in ${delay}ms`, {
+          buildId,
+          key: uploadParams.key,
+          attempt,
+          error: error.message,
+          nextDelay: delay
+        });
+        
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  
+  logger.error(`❌ File upload failed after ${maxRetries} attempts`, {
+    buildId,
+    key: uploadParams.key,
+    error: lastError.message
+  });
+  
+  throw lastError;
+}
+
+/**
+ * Get appropriate content type for file (uses storageService helper)
  */
 function getContentType(filename) {
-  const ext = path.extname(filename).toLowerCase();
-  const contentTypes = {
-    '.html': 'text/html',
-    '.css': 'text/css',
-    '.js': 'application/javascript',
-    '.json': 'application/json',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.svg': 'image/svg+xml',
-    '.ico': 'image/x-icon',
-    '.woff': 'font/woff',
-    '.woff2': 'font/woff2',
-    '.ttf': 'font/ttf',
-    '.eot': 'application/vnd.ms-fontobject'
-  };
-
-  return contentTypes[ext] || 'application/octet-stream';
+  return storageService.getContentTypeFromExtension(path.extname(filename).toLowerCase());
 }
 
 /**
@@ -819,6 +1033,79 @@ function generateDeploymentUrl(tenantId, buildId) {
   } else {
     // Development: Use path-based approach
     return `http://${baseDomain}/sites/${tenantId}/${buildId}`;
+  }
+}
+
+/**
+ * Validate that the static export path exists and contains deployable files
+ */
+async function validateStaticExportPath(staticExportPath, buildId) {
+  try {
+    logger.info('🔍 Validating static export path', { buildId, staticExportPath });
+
+    // Check if directory exists
+    try {
+      await fs.access(staticExportPath);
+    } catch (error) {
+      const fallbackPath = path.join(path.dirname(staticExportPath), '.next');
+      logger.warn(`❌ Static export path not found: ${staticExportPath}, trying fallback: ${fallbackPath}`, { buildId });
+      
+      try {
+        await fs.access(fallbackPath);
+        logger.info('✅ Fallback path exists, updating staticExportPath', { buildId, fallbackPath });
+        return fallbackPath;
+      } catch (fallbackError) {
+        throw new Error(`Neither static export path (${staticExportPath}) nor fallback path (${fallbackPath}) exists`);
+      }
+    }
+
+    // Check if directory contains files
+    const entries = await fs.readdir(staticExportPath);
+    if (entries.length === 0) {
+      throw new Error(`Static export directory is empty: ${staticExportPath}`);
+    }
+
+    // Log directory contents for debugging
+    logger.info('📁 Static export directory contents', { 
+      buildId,
+      staticExportPath,
+      fileCount: entries.length,
+      files: entries.slice(0, 10) // Show first 10 files
+    });
+
+    // Check for essential files (at least index.html or _next folder)
+    const hasIndexHtml = entries.includes('index.html');
+    const hasNextFolder = entries.includes('_next');
+    const hasStaticFolder = entries.includes('static');
+
+    if (!hasIndexHtml && !hasNextFolder && !hasStaticFolder) {
+      logger.warn('⚠️ Static export directory may not contain valid Next.js build output', {
+        buildId,
+        hasIndexHtml,
+        hasNextFolder,
+        hasStaticFolder,
+        entries: entries.slice(0, 20)
+      });
+    }
+
+    logger.info('✅ Static export path validation successful', { 
+      buildId,
+      staticExportPath,
+      fileCount: entries.length,
+      hasIndexHtml,
+      hasNextFolder
+    });
+
+    return staticExportPath;
+
+  } catch (error) {
+    logger.error('❌ Static export path validation failed', { 
+      buildId,
+      staticExportPath,
+      error: error.message 
+    });
+    error.phase = 'validation';
+    throw error;
   }
 }
 

@@ -1,10 +1,18 @@
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
 const { body, validationResult } = require('express-validator');
 const { prisma } = require('../lib/prisma');
 const logger = require('../utils/logger');
 const { buildQueue } = require('../services/buildService');
 const storageService = require('../services/storageService');
+
+// Ensure temp upload directory exists
+const tempUploadDir = 'temp/uploads/';
+if (!fs.existsSync(tempUploadDir)) {
+  fs.mkdirSync(tempUploadDir, { recursive: true });
+  logger.info('Created temp upload directory:', tempUploadDir);
+}
 
 // Configure multer for file uploads
 const upload = multer({
@@ -66,6 +74,21 @@ class UploadController {
 
       // Attach tenant info to request (similar to tenantAuth middleware)
       req.tenant = tenantMembership.tenant;
+      
+      // Validate tenant data before proceeding
+      if (!tenantMembership.tenant || !tenantMembership.tenant.tenantId) {
+        logger.error('Invalid tenant data from membership query', {
+          tenantMembership,
+          hasTenant: !!tenantMembership.tenant,
+          tenantKeys: tenantMembership.tenant ? Object.keys(tenantMembership.tenant) : 'none'
+        });
+        return res.status(500).json({
+          success: false,
+          error: 'Invalid tenant data',
+          message: 'Tenant information is incomplete'
+        });
+      }
+      
       req.params.tenantId = tenantMembership.tenant.tenantId;
 
       // Call the existing uploadFile method
@@ -126,6 +149,16 @@ class UploadController {
       const storageKey = `tenants/${tenantId}/builds/${build.id}/source.zip`;
       const uploadBucket = process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME;
 
+      // Validate file before upload
+      if (!req.file || !req.file.path) {
+        throw new Error('No file uploaded or file path missing');
+      }
+
+      const fs = require('fs');
+      if (!fs.existsSync(req.file.path)) {
+        throw new Error(`Uploaded file not found at path: ${req.file.path}`);
+      }
+
       logger.info('Uploading ZIP file to S3', {
         buildId: build.id,
         filePath: req.file.path,
@@ -135,7 +168,12 @@ class UploadController {
         originalName: req.file.originalname
       });
 
-      const uploadResult = await storageService.uploadFile(req.file.path, storageKey, uploadBucket);
+      const uploadResult = await storageService.uploadFile({
+        filePath: req.file.path,
+        key: storageKey,
+        bucket: uploadBucket,
+        contentType: req.file.mimetype
+      });
 
       // Add verification logging
       console.log('✅ S3 Upload Result:', {
@@ -144,6 +182,18 @@ class UploadController {
         key: uploadResult.Key,
         etag: uploadResult.ETag,
         size: req.file.size
+      });
+
+      // Validate tenant information before queuing
+      if (!req.tenant || !req.tenant.tenantId) {
+        throw new Error('Tenant information missing - req.tenant.tenantId is required');
+      }
+
+      logger.debug('Queuing build with tenant data', {
+        buildId: build.id,
+        tenantId: req.tenant.tenantId,
+        tenantObject: !!req.tenant,
+        hasTenantId: !!req.tenant.tenantId
       });
 
       // Add to build queue
@@ -324,6 +374,11 @@ class UploadController {
           errorMessage: null
         }
       });
+
+      // Validate tenant information before re-queuing
+      if (!req.tenant || !req.tenant.tenantId) {
+        throw new Error('Tenant information missing - req.tenant.tenantId is required for retry');
+      }
 
       // Re-queue the build
       const storageKey = `tenants/${req.tenant.tenantId}/builds/${build.id}/source.zip`;

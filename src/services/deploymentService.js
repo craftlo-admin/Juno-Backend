@@ -262,6 +262,7 @@ async function getCurrentVersion(tenantId) {
 module.exports = {
   deployToCloudFront,
   rollbackDeployment,
+  updateVersionPointer,
   invalidateCloudFrontCache,
   getInvalidationStatus,
   createTenantDistribution,
