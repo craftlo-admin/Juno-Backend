@@ -90,19 +90,21 @@ async function updateVersionPointer(tenantId, version) {
  * @param {string} tenantId - Tenant identifier
  * @returns {string} - Invalidation ID
  */
-async function invalidateCloudFrontCache(tenantId) {
+async function invalidateCloudFrontCache(tenantId, buildId = null) {
   try {
     const distributionId = process.env.AWS_CLOUDFRONT_DISTRIBUTION_ID;
     
-    if (!distributionId) {
+    if (!distributionId || distributionId === 'user-app-dev-distribution') {
       logger.warn('CloudFront distribution ID not configured, skipping invalidation');
       return null;
     }
 
-    const invalidationPaths = [
-      `/pointers/${tenantId}/*`,
-      `/tenants/${tenantId}/current/*`,
-      `/${tenantId}/*` // If using path-based routing
+    const invalidationPaths = buildId ? [
+      `/tenants/${tenantId}/deployments/${buildId}/*`,  // Specific build invalidation
+      `/pointers/${tenantId}/*`                         // Version pointers
+    ] : [
+      `/tenants/${tenantId}/deployments/*`,             // All tenant deployments
+      `/pointers/${tenantId}/*`                         // Version pointers
     ];
 
     const params = {

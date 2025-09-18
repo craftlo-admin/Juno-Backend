@@ -397,6 +397,9 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
     // 8. Inject tenant-specific environment variables
     await injectEnvironmentVariables(projectDir, buildId, buildConfig, tenantId);
 
+    // 8a. Configure Next.js for static export
+    await configureNextJsForStaticExport(projectDir, buildId);
+
     // 9. Build Next.js application
     logger.info('Building Next.js application', { buildId, cwd: projectDir });
     const buildResult = await execAsync('npm run build', { 
@@ -411,11 +414,14 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
       stdout: buildResult.stdout?.substring(0, 500) + '...'
     });
 
-    // 10. Export static files (if Next.js supports static export)
+    // 10. Export static files (Next.js static export)
     let staticExportPath = projectDir;
     try {
-      logger.info('Attempting static export', { buildId, cwd: projectDir });
-      const exportResult = await execAsync('npx next export', { 
+      logger.info('📤 Attempting Next.js static export', { buildId, cwd: projectDir });
+      
+      // With output: 'export' in next.config.js, the build command should generate static files
+      // But let's also try explicit export command as backup
+      const exportResult = await execAsync('npm run build && npx next export', { 
         cwd: projectDir,
         timeout: 300000, // 5 minutes timeout
         maxBuffer: 1024 * 1024 * 10,
@@ -423,20 +429,33 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
       });
       
       staticExportPath = path.join(projectDir, 'out');
-      logger.info('Static export successful', { 
+      logger.info('✅ Static export successful', { 
         buildId,
         staticExportPath,
         stdout: exportResult.stdout?.substring(0, 500) + '...'
       });
     } catch (exportError) {
-      logger.warn('Static export failed, using build output', { 
+      logger.warn('⚠️ Static export failed, checking for existing out directory', { 
         buildId,
-        error: exportError.message,
-        fallbackPath: path.join(projectDir, '.next')
+        error: exportError.message
       });
       
-      // Use .next build output if static export fails
-      staticExportPath = path.join(projectDir, '.next');
+      // Check if 'out' directory exists from the build with output: 'export'
+      const outPath = path.join(projectDir, 'out');
+      try {
+        await fs.access(outPath);
+        staticExportPath = outPath;
+        logger.info('✅ Found out directory from build', { buildId, staticExportPath });
+      } catch (outError) {
+        logger.warn('❌ No out directory found, using .next build output', { 
+          buildId,
+          error: outError.message,
+          fallbackPath: path.join(projectDir, '.next')
+        });
+        
+        // Use .next build output if static export fails
+        staticExportPath = path.join(projectDir, '.next');
+      }
     }
 
     // Validate that the static export path exists and contains files
@@ -462,7 +481,7 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
       await deploymentService.updateVersionPointer(tenantId, buildId);
       
       // Invalidate CloudFront cache to ensure immediate deployment
-      cloudfrontInvalidationId = await deploymentService.invalidateCloudFrontCache(tenantId);
+      cloudfrontInvalidationId = await deploymentService.invalidateCloudFrontCache(tenantId, buildId);
       
       logger.info('CloudFront deployment completed', { 
         buildId,
@@ -477,8 +496,8 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
       });
     }
 
-    // 13. Generate deployment URL
-    const deploymentUrl = generateDeploymentUrl(tenantId, buildId);
+    // 13. Generate deployment URL with correct file path detection
+    const deploymentUrl = await generateDeploymentUrl(tenantId, buildId, staticExportPath);
 
     // 14. Update deployment status to active
     try {
@@ -833,6 +852,68 @@ async function validateNextJsProject(projectDir, buildId) {
 }
 
 /**
+ * Configure Next.js for static export
+ */
+async function configureNextJsForStaticExport(projectDir, buildId) {
+  try {
+    logger.info('🔧 Configuring Next.js for static export', { buildId, projectDir });
+
+    const nextConfigPath = path.join(projectDir, 'next.config.js');
+    let nextConfigExists = false;
+    let existingConfig = {};
+
+    // Check if next.config.js already exists
+    try {
+      await fs.access(nextConfigPath);
+      nextConfigExists = true;
+      
+      // Try to read existing config (basic parsing)
+      const configContent = await fs.readFile(nextConfigPath, 'utf8');
+      logger.info('📄 Existing next.config.js found', { buildId, configContent: configContent.substring(0, 200) + '...' });
+      
+      // Simple check if static export is already configured
+      if (configContent.includes("output: 'export'") || configContent.includes('output:"export"')) {
+        logger.info('✅ Static export already configured in next.config.js', { buildId });
+        return;
+      }
+    } catch (error) {
+      logger.info('📄 No existing next.config.js found, creating new one', { buildId });
+    }
+
+    // Create or update next.config.js for static export
+    const nextConfig = `/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: 'export',
+  trailingSlash: true,
+  images: {
+    unoptimized: true
+  },
+  // Disable server-side features for static export
+  experimental: {
+    esmExternals: false
+  }
+}
+
+module.exports = nextConfig`;
+
+    await fs.writeFile(nextConfigPath, nextConfig);
+    
+    logger.info('✅ Next.js configured for static export', { 
+      buildId,
+      configPath: nextConfigPath,
+      wasExisting: nextConfigExists
+    });
+
+  } catch (error) {
+    logger.warn('⚠️ Failed to configure Next.js for static export', { 
+      buildId,
+      error: error.message 
+    });
+    // Don't fail the build for config issues, but log the error
+  }
+}
+
+/**
  * Inject tenant-specific environment variables
  */
 async function injectEnvironmentVariables(projectDir, buildId, buildConfig, tenantId) {
@@ -1024,16 +1105,150 @@ function getContentType(filename) {
 /**
  * Generate deployment URL for the tenant
  */
-function generateDeploymentUrl(tenantId, buildId) {
-  const baseDomain = process.env.BASE_DOMAIN || 'localhost:8000';
-  
-  if (process.env.NODE_ENV === 'production') {
-    // Production: Use subdomain approach
-    return `https://${tenantId}.${baseDomain}`;
-  } else {
-    // Development: Use path-based approach
-    return `http://${baseDomain}/sites/${tenantId}/${buildId}`;
+async function generateDeploymentUrl(tenantId, buildId, staticExportPath = null) {
+  try {
+    const cloudfrontDomain = process.env.CLOUDFRONT_DOMAIN;
+    const baseDomain = process.env.BASE_DOMAIN || 'localhost:3000';
+    
+    // If CloudFront is configured, find the correct path to index.html
+    if (cloudfrontDomain && cloudfrontDomain !== 'dev-cloudfront-domain') {
+      let indexPath = '';
+      
+      // Try to find index.html in the exported files
+      if (staticExportPath) {
+        try {
+          const indexHtmlPath = await findIndexHtmlPath(staticExportPath);
+          if (indexHtmlPath) {
+            // Convert absolute path to relative path from staticExportPath
+            const relativePath = path.relative(staticExportPath, indexHtmlPath);
+            // Convert Windows path separators to URL separators
+            indexPath = '/' + relativePath.replace(/\\/g, '/');
+          }
+        } catch (error) {
+          logger.warn('Could not find index.html path, using root', { 
+            buildId, 
+            error: error.message 
+          });
+        }
+      }
+      
+      const baseUrl = `https://${cloudfrontDomain}/tenants/${tenantId}/deployments/${buildId}`;
+      const fullUrl = baseUrl + indexPath;
+      
+      logger.info('Generated CloudFront URL with index path', { 
+        baseUrl, 
+        indexPath, 
+        fullUrl, 
+        tenantId, 
+        buildId 
+      });
+      
+      return fullUrl;
+    }
+    
+    // Fallback for development/local testing
+    if (process.env.NODE_ENV === 'production') {
+      // Production without CloudFront: Use subdomain approach
+      const cleanDomain = baseDomain.replace(/^https?:\/\//, '');
+      return `https://${tenantId}.${cleanDomain}`;
+    } else {
+      // Development: Use path-based approach for local testing
+      const cleanDomain = baseDomain.replace(/^https?:\/\//, '');
+      return `http://${cleanDomain}/sites/${tenantId}/${buildId}`;
+    }
+  } catch (error) {
+    logger.error('Failed to generate deployment URL', { 
+      error: error.message, 
+      tenantId, 
+      buildId 
+    });
+    // Return basic CloudFront URL as fallback
+    const cloudfrontDomain = process.env.CLOUDFRONT_DOMAIN;
+    if (cloudfrontDomain) {
+      return `https://${cloudfrontDomain}/tenants/${tenantId}/deployments/${buildId}`;
+    }
+    return `${process.env.BASE_DOMAIN || 'http://localhost:3000'}/tenant/${tenantId}/deployment/${buildId}`;
   }
+}
+
+/**
+ * Find the path to index.html in the static export directory
+ */
+async function findIndexHtmlPath(staticExportPath) {
+  try {
+    // First, try root level
+    const rootIndexPath = path.join(staticExportPath, 'index.html');
+    try {
+      await fs.access(rootIndexPath);
+      return rootIndexPath;
+    } catch (error) {
+      // Not at root level, search subdirectories
+    }
+    
+    // Search for index.html in subdirectories
+    const searchPaths = [
+      path.join(staticExportPath, 'server', 'app', 'index.html'),
+      path.join(staticExportPath, 'app', 'index.html'),
+      path.join(staticExportPath, 'build', 'index.html'),
+      path.join(staticExportPath, 'dist', 'index.html')
+    ];
+    
+    for (const searchPath of searchPaths) {
+      try {
+        await fs.access(searchPath);
+        logger.info('Found index.html', { path: searchPath });
+        return searchPath;
+      } catch (error) {
+        // Continue searching
+      }
+    }
+    
+    // If not found in common locations, do a recursive search
+    return await recursivelyFindIndexHtml(staticExportPath);
+    
+  } catch (error) {
+    logger.warn('Could not find index.html', { 
+      staticExportPath, 
+      error: error.message 
+    });
+    return null;
+  }
+}
+
+/**
+ * Recursively search for index.html in the export directory
+ */
+async function recursivelyFindIndexHtml(dir, maxDepth = 3, currentDepth = 0) {
+  if (currentDepth >= maxDepth) {
+    return null;
+  }
+  
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    
+    // First check for index.html in current directory
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name === 'index.html') {
+        return path.join(dir, entry.name);
+      }
+    }
+    
+    // Then search subdirectories
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const subDirPath = path.join(dir, entry.name);
+        const result = await recursivelyFindIndexHtml(subDirPath, maxDepth, currentDepth + 1);
+        if (result) {
+          return result;
+        }
+      }
+    }
+    
+  } catch (error) {
+    // Ignore directory access errors
+  }
+  
+  return null;
 }
 
 /**
