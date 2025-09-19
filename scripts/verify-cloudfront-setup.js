@@ -120,3 +120,7 @@ console.log('   4. Update any remaining hardcoded domain references');
 
 console.log('\n🎉 Dynamic CloudFront system setup verification complete!');
 console.log('System is ready for tenant-specific CloudFront distributions.');
+}
+
+// Run the main function
+main().catch(console.error);
