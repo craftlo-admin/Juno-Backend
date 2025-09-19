@@ -1,7 +1,7 @@
 const { body, validationResult } = require('express-validator');
 const { prisma } = require('../lib/prisma');
 const logger = require('../utils/logger');
-const { generateTenantId, generateTenantDomain, isValidTenantId } = require('../utils/tenantUtils');
+const { generateTenantId, generateTenantDomain, generateCustomDomain, isValidTenantId } = require('../utils/tenantUtils');
 
 class TenantController {
   // Validation middleware
@@ -98,7 +98,7 @@ class TenantController {
 
         const membership = await tx.tenantMember.create({
           data: {
-            tenantId: tenant.id,
+            tenantId: tenant.tenantId, // Use tenantId (string identifier) not id (UUID)
             userId: userId,
             role: 'owner',
             status: 'active',
@@ -399,7 +399,7 @@ class TenantController {
       const existingMembership = await prisma.tenantMember.findUnique({
         where: {
           tenantId_userId: {
-            tenantId: req.tenant.id,
+            tenantId: req.tenant.tenantId,
             userId: userToInvite.id
           }
         }
@@ -415,7 +415,7 @@ class TenantController {
       // Create membership
       const membership = await prisma.tenantMember.create({
         data: {
-          tenantId: req.tenant.id,
+          tenantId: req.tenant.tenantId,
           userId: userToInvite.id,
           role,
           status: 'active',
@@ -475,7 +475,7 @@ class TenantController {
       const membership = await prisma.tenantMember.update({
         where: {
           tenantId_userId: {
-            tenantId: req.tenant.id,
+            tenantId: req.tenant.tenantId,
             userId: targetUserId
           }
         },
@@ -531,7 +531,7 @@ class TenantController {
       await prisma.tenantMember.delete({
         where: {
           tenantId_userId: {
-            tenantId: req.tenant.id,
+            tenantId: req.tenant.tenantId,
             userId: targetUserId
           }
         }

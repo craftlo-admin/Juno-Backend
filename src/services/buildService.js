@@ -185,7 +185,13 @@ buildQueue.process('process-build', async (job) => {
       if (buildResult.deploymentUrl) {
         logger.info('🌐 WEBSITE DEPLOYED SUCCESSFULLY!');
         logger.info(`🔗 Live URL: ${buildResult.deploymentUrl}`);
-        logger.info(`📄 Index Page: ${buildResult.deploymentUrl.replace(/\/$/, '')}/index.html`);
+        
+        // Only show "Index Page" if URL doesn't already end with index.html
+        if (!buildResult.deploymentUrl.endsWith('/index.html')) {
+          logger.info(`📄 Index Page: ${buildResult.deploymentUrl.replace(/\/$/, '')}/index.html`);
+        } else {
+          logger.info(`📄 Direct Access: ${buildResult.deploymentUrl}`);
+        }
       }
 
     } else {
@@ -537,8 +543,16 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
     logger.info('🎉 DEPLOYMENT SUCCESSFUL! 🎉');
     logger.info('🌐 Your website is now live at:');
     logger.info(`🔗 ${deploymentUrl}`);
-    logger.info('📄 Direct link to index page:');
-    logger.info(`🏠 ${deploymentUrl.replace(/\/$/, '')}/index.html`);
+    
+    // Only show "Direct link to index page" if deploymentUrl doesn't already end with index.html
+    if (!deploymentUrl.endsWith('/index.html')) {
+      logger.info('📄 Direct link to index page:');
+      logger.info(`🏠 ${deploymentUrl.replace(/\/$/, '')}/index.html`);
+    } else {
+      logger.info('📄 Direct link (already includes index.html):');
+      logger.info(`🏠 ${deploymentUrl}`);
+    }
+    
     logger.info('✨ CloudFront distribution ready with tenant-specific domain!');
 
     return {
@@ -929,7 +943,7 @@ async function injectEnvironmentVariables(projectDir, buildId, buildConfig, tena
       `NEXT_PUBLIC_TENANT_ID=${tenantId}`,
       `NEXT_PUBLIC_BUILD_ID=${buildId}`,
       `NEXT_PUBLIC_API_BASE_URL=${process.env.API_BASE_URL || 'http://localhost:8000'}`,
-      `NEXT_PUBLIC_BASE_DOMAIN=${process.env.BASE_DOMAIN || 'localhost'}`,
+      `NEXT_PUBLIC_BASE_DOMAIN=${process.env.CUSTOM_DOMAIN_ENABLED === 'true' ? process.env.CUSTOM_DOMAIN_BASE : process.env.BASE_DOMAIN || 'localhost'}`,
       `NEXT_PUBLIC_DEPLOYED_AT=${new Date().toISOString()}`,
       ''
     ];
@@ -1124,9 +1138,16 @@ async function generateDeploymentUrl(tenantId, buildId, staticExportPath = null)
           const indexHtmlPath = await findIndexHtmlPath(staticExportPath);
           if (indexHtmlPath) {
             const relativePath = path.relative(staticExportPath, indexHtmlPath);
+            // Clean up the relative path and ensure no double index.html
+            const cleanRelativePath = relativePath.replace(/\\/g, '/');
+            
             // Only append relative path if it's not just 'index.html' at root
-            if (relativePath !== 'index.html') {
-              const urlPath = '/' + relativePath.replace(/\\/g, '/');
+            if (cleanRelativePath !== 'index.html') {
+              // Ensure the path starts with / and doesn't have double /index.html
+              let urlPath = '/' + cleanRelativePath;
+              if (!urlPath.endsWith('/index.html')) {
+                urlPath += '/index.html';
+              }
               deploymentPath += urlPath;
             } else {
               // If index.html is at root, just append it directly

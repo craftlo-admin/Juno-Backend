@@ -51,6 +51,9 @@ model Tenant {
   cloudfrontUniqueId        String?      @map("cloudfront_unique_id")
   cloudfrontCreatedAt       DateTime?    @map("cloudfront_created_at")
   
+  // Primary domain used for deployments (custom domain or CloudFront)
+  primaryDomain             String?      @map("primary_domain")
+  
   lastDeployedAt            DateTime?    @map("last_deployed_at")
   createdAt                 DateTime     @default(now()) @map("created_at")
   updatedAt                 DateTime     @updatedAt @map("updated_at")

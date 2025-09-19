@@ -45,19 +45,54 @@ const generateTenantId = async (name) => {
 
 /**
  * Generates a default subdomain for a new tenant based on its unique tenant ID.
- * Example: "my-tenant-a1b2c3d4" -> "my-tenant-a1b2c3d4.yourapp.com"
+ * Example: "my-tenant-a1b2c3d4" -> "my-tenant-a1b2c3d4.junotech.in"
  * @param {string} tenantId - The unique ID of the tenant.
  * @returns {string} The generated subdomain.
  */
 const generateTenantDomain = (tenantId) => {
-  const baseDomain = process.env.BASE_DOMAIN;
+  // Use custom domain if enabled, otherwise fall back to BASE_DOMAIN
+  const baseDomain = process.env.CUSTOM_DOMAIN_ENABLED === 'true' 
+    ? process.env.CUSTOM_DOMAIN_BASE || 'junotech.in'
+    : process.env.BASE_DOMAIN;
+    
   if (!baseDomain) {
-    throw new Error('BASE_DOMAIN is not defined in the environment variables.');
+    throw new Error('Neither CUSTOM_DOMAIN_BASE nor BASE_DOMAIN is defined in environment variables.');
   }
+  
   return `${tenantId}.${baseDomain}`;
+};
+
+/**
+ * Generates a custom subdomain for CloudFront distribution aliases
+ * Uses junotech.in as the base domain for custom subdomains
+ * @param {string} tenantId - The unique ID of the tenant.
+ * @returns {string|null} The generated custom domain or null if not enabled.
+ */
+const generateCustomDomain = (tenantId) => {
+  if (process.env.CUSTOM_DOMAIN_ENABLED === 'true' && process.env.CUSTOM_DOMAIN_BASE) {
+    return `${tenantId}.${process.env.CUSTOM_DOMAIN_BASE}`;
+  }
+  return null;
+};
+
+/**
+ * Validates if a tenant ID is in the correct format
+ * @param {string} tenantId - The tenant ID to validate
+ * @returns {boolean} True if valid, false otherwise
+ */
+const isValidTenantId = (tenantId) => {
+  if (!tenantId || typeof tenantId !== 'string') {
+    return false;
+  }
+  
+  // Check if it matches the expected format: lowercase letters, numbers, and hyphens
+  const tenantIdRegex = /^[a-z0-9-]+$/;
+  return tenantIdRegex.test(tenantId) && tenantId.length > 3 && tenantId.length < 100;
 };
 
 module.exports = {
   generateTenantId,
   generateTenantDomain,
+  generateCustomDomain,
+  isValidTenantId,
 };

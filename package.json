@@ -29,6 +29,8 @@
     "logs:error": "Get-Content logs/error.log -Wait -Tail 10",
     "logs:clear": "Remove-Item logs/*.log -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path logs",
     "test:zip": "node scripts/test-zip-extraction.js",
+    "test:dns": "node scripts/validate-dns-service.js",
+    "test:hostinger": "node scripts/check-hostinger-dns.js",
     "debug": "node --inspect=0.0.0.0:9229 src/server.js",
     "build": "echo 'No build step required for Node.js backend'",
     "postinstall": "npx prisma generate",

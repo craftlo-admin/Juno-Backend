@@ -196,7 +196,7 @@ async function injectTenantConfig(workDir, tenantId, version) {
       `NEXT_PUBLIC_TENANT_ID=${tenantId}`,
       `NEXT_PUBLIC_VERSION=${version}`,
       `NEXT_PUBLIC_API_BASE_URL=${process.env.API_BASE_URL}`,
-      `NEXT_PUBLIC_BASE_DOMAIN=${process.env.BASE_DOMAIN}`
+      `NEXT_PUBLIC_BASE_DOMAIN=${process.env.CUSTOM_DOMAIN_ENABLED === 'true' ? process.env.CUSTOM_DOMAIN_BASE : process.env.BASE_DOMAIN}`
     ].join('\n');
     
     await fs.writeFile(path.join(sourceDir, '.env.local'), envContent);

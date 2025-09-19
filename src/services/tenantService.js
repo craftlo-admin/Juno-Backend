@@ -115,8 +115,8 @@ const createTenant = async (tx, userData) => {
     });
 
     logger.info('✅ Tenant created successfully', { 
-      tenantId: tenant.id, 
-      tenantIdentifier: tenant.tenantId,
+      tenantUUID: tenant.id, // UUID primary key
+      tenantId: tenant.tenantId, // String identifier  
       ownerId: userData.id 
     });
 
@@ -125,7 +125,7 @@ const createTenant = async (tx, userData) => {
     if (typeof tx.tenantMember?.create === 'function') {
       try {
         const membershipData = {
-          tenantId: tenant.id,
+          tenantId: tenant.tenantId, // Use tenantId (string identifier) not id (UUID)
           userId: userData.id,
           role: 'owner',
           status: 'active',
@@ -145,14 +145,14 @@ const createTenant = async (tx, userData) => {
         });
 
         logger.info('✅ Tenant membership created', { 
-          tenantId: tenant.id, 
+          tenantId: tenant.tenantId, // Use tenantId for consistency
           userId: userData.id, 
           role: 'owner' 
         });
       } catch (memberError) {
         logger.warn('⚠️ Tenant membership creation failed (non-critical):', {
           error: memberError.message,
-          tenantId: tenant.id,
+          tenantId: tenant.tenantId, // Use tenantId for consistency
           userId: userData.id
         });
         // Don't throw here as tenant creation is the primary goal

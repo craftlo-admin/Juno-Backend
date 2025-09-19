@@ -22,12 +22,12 @@ class ProjectController {
         data: {
           name,
           description,
-          tenantId: tenant.id,
+          tenantId: tenant.tenantId, // Use tenantId (string identifier) not id (UUID)
           settings: settings || {}
         }
       });
       
-      logger.info('Project created:', { projectId: project.id, tenantId: tenant.id });
+      logger.info('Project created:', { projectId: project.id, tenantId: tenant.tenantId });
       
       res.status(201).json({
         success: true,
@@ -47,7 +47,7 @@ class ProjectController {
       const { tenant } = req;
       
       const projects = await prisma.project.findMany({
-        where: { tenantId: tenant.id },
+        where: { tenantId: tenant.tenantId },
         include: {
           builds: {
             orderBy: { createdAt: 'desc' },
@@ -80,7 +80,7 @@ class ProjectController {
       
       // Verify project belongs to tenant
       const project = await prisma.project.findFirst({
-        where: { id: projectId, tenantId: tenant.id }
+        where: { id: projectId, tenantId: tenant.tenantId }
       });
       
       if (!project) {
@@ -126,7 +126,7 @@ class ProjectController {
       const { tenant } = req;
       
       const project = await prisma.project.findFirst({
-        where: { id: projectId, tenantId: tenant.id }
+        where: { id: projectId, tenantId: tenant.tenantId }
       });
       
       if (!project) {
@@ -154,7 +154,7 @@ class ProjectController {
       const { name, description, settings } = req.body;
       
       const project = await prisma.project.findFirst({
-        where: { id: projectId, tenantId: tenant.id }
+        where: { id: projectId, tenantId: tenant.tenantId }
       });
       
       if (!project) {
@@ -190,7 +190,7 @@ class ProjectController {
       const { tenant } = req;
       
       const project = await prisma.project.findFirst({
-        where: { id: projectId, tenantId: tenant.id }
+        where: { id: projectId, tenantId: tenant.tenantId }
       });
       
       if (!project) {
@@ -222,7 +222,7 @@ class ProjectController {
       
       // Verify project exists and belongs to tenant
       const project = await prisma.project.findFirst({
-        where: { id: projectId, tenantId: tenant.id }
+        where: { id: projectId, tenantId: tenant.tenantId }
       });
       
       if (!project) {
@@ -251,7 +251,7 @@ class ProjectController {
       const { tenant } = req;
       
       const project = await prisma.project.findFirst({
-        where: { id: projectId, tenantId: tenant.id }
+        where: { id: projectId, tenantId: tenant.tenantId }
       });
       
       if (!project) {
@@ -279,7 +279,7 @@ class ProjectController {
       const { tenant } = req;
       
       const project = await prisma.project.findFirst({
-        where: { id: projectId, tenantId: tenant.id }
+        where: { id: projectId, tenantId: tenant.tenantId }
       });
       
       if (!project) {
