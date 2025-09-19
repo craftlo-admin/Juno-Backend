@@ -80,7 +80,7 @@ async function updateVersionPointer(tenantId, version) {
       tenantId: tenantId,
       version: version,
       timestamp: new Date().toISOString(),
-      path: `tenants/${tenantId}/${version}/`
+      path: `tenants/${tenantId}/deployments/${version}/`
     };
 
     const pointerKey = `pointers/${tenantId}/current.json`;

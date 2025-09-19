@@ -43,14 +43,8 @@ class TenantDistributionService {
             Id: `${tenantId}-s3-origin`,
             DomainName: `${process.env.AWS_S3_BUCKET_STATIC}.s3.amazonaws.com`,
             OriginPath: `/tenants/${tenantId}`,
-            CustomOriginConfig: {
-              HTTPPort: 80,
-              HTTPSPort: 443,
-              OriginProtocolPolicy: 'https-only',
-              OriginSslProtocols: {
-                Quantity: 1,
-                Items: ['TLSv1.2']
-              }
+            S3OriginConfig: {
+              OriginAccessIdentity: ''
             }
           }]
         },
@@ -86,13 +80,13 @@ class TenantDistributionService {
           Items: [
             {
               ErrorCode: 404,
-              ResponsePagePath: '/index.html',
+              ResponsePagePath: '/deployments/current/index.html',
               ResponseCode: '200',
               ErrorCachingMinTTL: 300
             },
             {
               ErrorCode: 403,
-              ResponsePagePath: '/index.html', 
+              ResponsePagePath: '/deployments/current/index.html', 
               ResponseCode: '200',
               ErrorCachingMinTTL: 300
             }

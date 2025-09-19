@@ -15,41 +15,48 @@ async function main() {
     const TenantDistributionService = require('../src/services/tenantDistributionService');
     console.log('✅ TenantDistributionService loaded successfully');
   
-  // Check if all required methods exist
-  const methods = [
-    'createTenantDistribution',
-    'getTenantDistribution', 
-    'getOrCreateTenantDistribution',
-    'invalidateTenantCache',
-    'deleteTenantDistribution'
-  ];
-  
-  for (const method of methods) {
-    if (typeof TenantDistributionService[method] === 'function') {
-      console.log(`   ✅ ${method}() method available`);
-    } else {
-      console.log(`   ❌ ${method}() method missing`);
+    // Check if all required methods exist
+    const methods = [
+      'createTenantDistribution',
+      'getTenantDistribution', 
+      'getOrCreateTenantDistribution',
+      'invalidateTenantCache',
+      'deleteTenantDistribution'
+    ];
+    
+    for (const method of methods) {
+      if (typeof TenantDistributionService[method] === 'function') {
+        console.log(`   ✅ ${method}() method available`);
+      } else {
+        console.log(`   ❌ ${method}() method missing`);
+      }
     }
+    
+  } catch (error) {
+    console.log(`❌ Failed to load TenantDistributionService: ${error.message}`);
+    process.exit(1);
   }
-  
-} catch (error) {
-  console.log(`❌ Failed to load TenantDistributionService: ${error.message}`);
-  process.exit(1);
-}
 
 // Test 2: Check database connection
 console.log('\n2. 🗄️ Testing database connection...');
 try {
   const { PrismaClient } = require('@prisma/client');
-  const prisma = new PrismaClient();
+  const testPrisma = new PrismaClient({
+    log: [], // Disable logging to avoid noise
+  });
   
   console.log('✅ Prisma client initialized');
-  console.log('✅ Database connection ready');
+  
+  // Quick connection test
+  await testPrisma.$connect();
+  console.log('✅ Database connection successful');
   
   // Test if we can access the Tenant model with new fields
   console.log('✅ Tenant model available with CloudFront fields');
   
-  await prisma.$disconnect();
+  // Properly disconnect
+  await testPrisma.$disconnect();
+  console.log('✅ Database connection closed');
   
 } catch (error) {
   console.log(`❌ Database connection failed: ${error.message}`);
@@ -62,7 +69,8 @@ const requiredEnvVars = [
   'AWS_ACCESS_KEY_ID',
   'AWS_SECRET_ACCESS_KEY', 
   'AWS_REGION',
-  'AWS_S3_BUCKET',
+  'AWS_S3_BUCKET_STATIC',
+  'AWS_S3_BUCKET_UPLOADS',
   'DATABASE_URL'
 ];
 
@@ -120,7 +128,13 @@ console.log('   4. Update any remaining hardcoded domain references');
 
 console.log('\n🎉 Dynamic CloudFront system setup verification complete!');
 console.log('System is ready for tenant-specific CloudFront distributions.');
+
+// Exit cleanly
+process.exit(0);
 }
 
 // Run the main function
-main().catch(console.error);
+main().catch((error) => {
+  console.error('❌ Verification script failed:', error);
+  process.exit(1);
+});

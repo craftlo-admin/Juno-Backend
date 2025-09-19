@@ -62,13 +62,20 @@ class BuildService {
   }
 }
 
-// Create build queue
+// Create build queue with fallback configuration
+const redisUrl = process.env.REDIS_URL || `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`;
+
 const buildQueue = new Queue('build processing', {
-  redis: {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: process.env.REDIS_PORT || 6379,
-    password: process.env.REDIS_PASSWORD || undefined
-  }
+  redis: redisUrl,
+  defaultJobOptions: {
+    removeOnComplete: 10,
+    removeOnFail: 50,
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 2000,
+    },
+  },
 });
 
 // Build queue processor
@@ -1117,8 +1124,14 @@ async function generateDeploymentUrl(tenantId, buildId, staticExportPath = null)
           const indexHtmlPath = await findIndexHtmlPath(staticExportPath);
           if (indexHtmlPath) {
             const relativePath = path.relative(staticExportPath, indexHtmlPath);
-            const urlPath = '/' + relativePath.replace(/\\/g, '/');
-            deploymentPath += urlPath;
+            // Only append relative path if it's not just 'index.html' at root
+            if (relativePath !== 'index.html') {
+              const urlPath = '/' + relativePath.replace(/\\/g, '/');
+              deploymentPath += urlPath;
+            } else {
+              // If index.html is at root, just append it directly
+              deploymentPath += '/index.html';
+            }
           }
         } catch (error) {
           logger.warn('Could not find index.html path, using base deployment path', { 

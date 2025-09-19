@@ -200,7 +200,7 @@ model Project {
 
 model TenantMember {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId  String   @map("tenant_id") @db.Uuid
+  tenantId  String   @map("tenant_id")
   userId    String   @map("user_id") @db.Uuid
   role      String   @default("member") // owner, admin, member
   status    String   @default("active") // active, inactive, pending
@@ -209,7 +209,7 @@ model TenantMember {
   updatedAt DateTime @updatedAt @map("updated_at")
   
   // Relations
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, userId])

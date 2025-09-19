@@ -129,10 +129,20 @@ const ENV_SCHEMA = {
     security: true,
     description: 'AWS secret access key for S3 operations'
   },
+  AWS_S3_BUCKET_STATIC: {
+    required: false,
+    type: 'string',
+    description: 'S3 bucket name for static site deployments'
+  },
+  AWS_S3_BUCKET_UPLOADS: {
+    required: false,
+    type: 'string',
+    description: 'S3 bucket name for ZIP file uploads'
+  },
   S3_BUCKET_NAME: {
     required: false,
     type: 'string',
-    description: 'S3 bucket name for file storage'
+    description: 'S3 bucket name for general file storage (legacy)'
   },
 
   // Application Configuration
