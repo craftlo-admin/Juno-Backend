@@ -353,62 +353,27 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
     // 5. Validate Next.js project structure
     await validateNextJsProject(projectDir, buildId);
 
-    // 6. Force install Tailwind dependencies (no detection, always install)
-    const depCheck = await forceInstallTailwindDependencies(projectDir, buildId);
+    // 6. Install project dependencies
+    logger.info('Installing project dependencies', { buildId, cwd: projectDir });
     
-    logger.info('📦 Tailwind dependencies force-installed', { 
-      buildId,
-      addedDependencies: depCheck.addedDeps.map(d => `${d.name}@${d.version}`),
-      willInstallDevDependencies: true
-    });
-
-    // 7. Install dependencies (always use full install with Tailwind dependencies)
-    logger.info('Installing project dependencies with Tailwind support', { buildId, cwd: projectDir });
-    
-    logger.info('📦 Installing with dev dependencies (Tailwind force-installed)', { 
-      buildId,
-      addedDependencies: depCheck.addedDeps.map(d => `${d.name}@${d.version}`)
-    });
-    
-    // First, clean npm cache to avoid any cache issues
-    try {
-      await execAsync('npm cache clean --force', { 
-        cwd: projectDir,
-        timeout: 120000,
-        env: { ...process.env, NODE_ENV: 'development' } // Explicitly set to development
-      });
-      logger.info('✅ npm cache cleaned', { buildId });
-    } catch (error) {
-      logger.warn('⚠️ npm cache clean failed (continuing)', { buildId, error: error.message });
-    }
-    
-    // Install dependencies with explicit flags to include devDependencies
-    const installResult = await execAsync('npm install --include=dev --legacy-peer-deps', { 
+    const installResult = await execAsync('npm install --legacy-peer-deps', { 
       cwd: projectDir,
       timeout: 600000, // 10 minutes timeout
       maxBuffer: 1024 * 1024 * 10, // 10MB buffer
-      env: { 
-        ...process.env, 
-        NODE_ENV: 'development', // Explicitly set to development to ensure devDeps are installed
-        npm_config_production: 'false' // Explicitly disable production mode
-      }
     });
     
-    logger.info('Dependencies installed successfully (full install with Tailwind support)', { 
+    logger.info('Dependencies installed successfully', { 
       buildId,
-      stdout: installResult.stdout?.substring(0, 500) + '...'
+      stdout: installResult.stdout?.substring(0, 200) + '...'
     });
 
-    // 7a. Verify Tailwind dependencies are actually installed
-    await verifyTailwindInstallation(projectDir, buildId);
-
-    // 8. Inject tenant-specific environment variables
+    // 7. Inject tenant-specific environment variables
     await injectEnvironmentVariables(projectDir, buildId, buildConfig, tenantId);
 
     // 8a. Configure Next.js for static export
     await configureNextJsForStaticExport(projectDir, buildId);
 
-    // 9. Build Next.js application
+    // 8. Build Next.js application
     logger.info('Building Next.js application', { buildId, cwd: projectDir });
     const buildResult = await execAsync('npm run build', { 
       cwd: projectDir,
@@ -422,7 +387,7 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
       stdout: buildResult.stdout?.substring(0, 500) + '...'
     });
 
-    // 10. Export static files (Next.js static export)
+    // 9. Export static files (Next.js static export)
     let staticExportPath = projectDir;
     try {
       logger.info('📤 Attempting Next.js static export', { buildId, cwd: projectDir });
@@ -469,7 +434,7 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
     // Validate that the static export path exists and contains files
     staticExportPath = await validateStaticExportPath(staticExportPath, buildId);
 
-    // 11. Upload built files to deployment bucket
+    // 10. Upload built files to deployment bucket
     const deploymentPath = `tenants/${tenantId}/deployments/${buildId}`;
     logger.info('Uploading built files to S3', { 
       buildId,
@@ -480,7 +445,7 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
 
     await uploadDirectoryToS3(staticExportPath, deploymentPath, buildId);
 
-    // 12. Setup CloudFront distribution and deployment
+    // 11. Setup CloudFront distribution and deployment
     let cloudfrontInvalidationId = null;
     let distributionInfo = null;
     try {
@@ -517,10 +482,10 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
       });
     }
 
-    // 13. Generate deployment URL with correct file path detection
+    // 12. Generate deployment URL with correct file path detection
     const deploymentUrl = await generateDeploymentUrl(tenantId, buildId, staticExportPath);
 
-    // 14. Update deployment status to active
+    // 13. Update deployment status to active
     try {
       const updateData = {
         status: 'active',
@@ -552,7 +517,7 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
       });
     }
 
-    // 15. Cleanup temporary files
+    // 14. Cleanup temporary files
     await cleanupBuildWorkspace(buildWorkspace, buildId);
 
     logger.info('Build process completed successfully', { 
@@ -1363,207 +1328,6 @@ async function cleanupBuildWorkspace(buildWorkspace, buildId) {
       buildWorkspace,
       error: error.message 
     });
-  }
-}
-
-/**
- * Force install Tailwind dependencies - no detection, always add them
- * Ensures Tailwind CSS is always available for builds
- */
-async function forceInstallTailwindDependencies(projectDir, buildId) {
-  try {
-    logger.info('� Force-installing Tailwind dependencies', { buildId, projectDir });
-
-    const packageJsonPath = path.join(projectDir, 'package.json');
-    const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf8'));
-    
-    const tailwindDeps = {
-      'tailwindcss': '^3.4.17',
-      'autoprefixer': '^10.4.21',
-      'postcss': '^8.5.6'
-    };
-
-    const addedDeps = [];
-
-    // Always ensure Tailwind dependencies are in devDependencies with correct versions
-    if (!packageJson.devDependencies) packageJson.devDependencies = {};
-    
-    for (const [dep, version] of Object.entries(tailwindDeps)) {
-      // Update version regardless of whether it exists
-      packageJson.devDependencies[dep] = version;
-      addedDeps.push({ name: dep, version });
-      logger.info(`📦 Force-added/updated dependency: ${dep}@${version}`, { buildId });
-    }
-
-    // Also ensure they're NOT in regular dependencies to avoid conflicts
-    if (packageJson.dependencies) {
-      for (const dep of Object.keys(tailwindDeps)) {
-        if (packageJson.dependencies[dep]) {
-          logger.info(`📦 Moving ${dep} from dependencies to devDependencies`, { buildId });
-          delete packageJson.dependencies[dep];
-        }
-      }
-    }
-
-    // Always update package.json
-    await fs.writeFile(packageJsonPath, JSON.stringify(packageJson, null, 2));
-    
-    logger.info('✅ Tailwind dependencies force-installed to package.json', { 
-      buildId,
-      addedDependencies: addedDeps.map(d => `${d.name}@${d.version}`)
-    });
-
-    return { addedDeps };
-
-  } catch (error) {
-    logger.warn('⚠️ Failed to force-install Tailwind dependencies', { 
-      buildId,
-      error: error.message 
-    });
-    // Return empty array if failed
-    return { addedDeps: [] };
-  }
-}
-
-/**
- * Verify that Tailwind dependencies are actually installed in node_modules
- */
-async function verifyTailwindInstallation(projectDir, buildId) {
-  try {
-    logger.info('🔍 Verifying Tailwind installation in node_modules', { buildId });
-
-    const tailwindDeps = ['tailwindcss', 'autoprefixer', 'postcss'];
-    const nodeModulesPath = path.join(projectDir, 'node_modules');
-    
-    // Check if node_modules exists
-    try {
-      await fs.access(nodeModulesPath);
-      logger.info('✅ node_modules directory exists', { buildId, nodeModulesPath });
-    } catch (error) {
-      logger.error('❌ node_modules directory not found', { buildId, nodeModulesPath });
-      throw new Error('node_modules directory not found after installation');
-    }
-
-    // Check each Tailwind dependency
-    for (const dep of tailwindDeps) {
-      const depPath = path.join(nodeModulesPath, dep);
-      try {
-        await fs.access(depPath);
-        const packageJsonPath = path.join(depPath, 'package.json');
-        const depPackageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf8'));
-        
-        logger.info(`✅ ${dep} installed successfully`, { 
-          buildId,
-          version: depPackageJson.version,
-          path: depPath
-        });
-      } catch (error) {
-        logger.error(`❌ ${dep} not found in node_modules`, { 
-          buildId,
-          expectedPath: depPath,
-          error: error.message
-        });
-        
-        // Try to reinstall the specific missing package
-        logger.info(`🔄 Attempting to reinstall ${dep}`, { buildId });
-        await execAsync(`npm install ${dep} --legacy-peer-deps --include=dev`, { 
-          cwd: projectDir,
-          timeout: 300000,
-          maxBuffer: 1024 * 1024 * 5,
-          env: { 
-            ...process.env, 
-            NODE_ENV: 'development',
-            npm_config_production: 'false'
-          }
-        });
-        
-        // Verify the reinstall worked
-        try {
-          await fs.access(depPath);
-          logger.info(`✅ ${dep} reinstalled successfully`, { buildId });
-        } catch (verifyError) {
-          logger.error(`❌ ${dep} reinstall failed - still not found`, { 
-            buildId,
-            error: verifyError.message
-          });
-        }
-      }
-    }
-
-    // List some contents of node_modules for debugging
-    try {
-      const nodeModulesContents = await fs.readdir(nodeModulesPath);
-      logger.info('📦 node_modules contents (first 20 packages)', { 
-        buildId,
-        totalPackages: nodeModulesContents.length,
-        packages: nodeModulesContents.slice(0, 20)
-      });
-    } catch (error) {
-      logger.warn('⚠️ Could not list node_modules contents', { buildId, error: error.message });
-    }
-
-    logger.info('✅ Tailwind installation verification completed', { buildId });
-
-  } catch (error) {
-    logger.error('❌ Tailwind installation verification failed', { 
-      buildId,
-      error: error.message 
-    });
-    // Don't fail the build, just warn
-  }
-}
-
-/**
- * Detect if project uses Tailwind CSS by scanning existing files
- */
-async function detectTailwindUsage(projectDir, buildId) {
-  try {
-    // Check CSS files for Tailwind directives
-    const cssFiles = [
-      'app/globals.css',
-      'styles/globals.css', 
-      'src/styles/globals.css',
-      'globals.css'
-    ];
-    
-    for (const cssFile of cssFiles) {
-      const cssPath = path.join(projectDir, cssFile);
-      try {
-        const cssContent = await fs.readFile(cssPath, 'utf8');
-        
-        // Look for Tailwind directives
-        const hasTailwindDirectives = cssContent.includes('@tailwind base') || 
-                                     cssContent.includes('@tailwind components') || 
-                                     cssContent.includes('@tailwind utilities') ||
-                                     cssContent.includes('tailwindcss');
-        
-        if (hasTailwindDirectives) {
-          logger.info('🎨 Tailwind directives found in CSS file', { 
-            buildId,
-            cssFile,
-            filePath: cssPath
-          });
-          return true;
-        }
-      } catch (error) {
-        // File doesn't exist, continue checking
-      }
-    }
-
-    // Check for existing tailwind.config.js
-    const tailwindConfigPath = path.join(projectDir, 'tailwind.config.js');
-    try {
-      await fs.access(tailwindConfigPath);
-      logger.info('🎨 Existing tailwind.config.js found', { buildId, configPath: tailwindConfigPath });
-      return true;
-    } catch (error) {
-      // No tailwind config found
-    }
-
-    return false;
-  } catch (error) {
-    logger.warn('⚠️ Error detecting Tailwind usage', { buildId, error: error.message });
-    return false;
   }
 }
 
