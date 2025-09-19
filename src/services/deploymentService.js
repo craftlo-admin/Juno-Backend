@@ -1,24 +1,43 @@
 const { cloudFront } = require('../config/aws');
 const { uploadToS3, copyS3Object } = require('./storageService');
+const TenantDistributionService = require('./tenantDistributionService');
 const logger = require('../utils/logger');
 
 /**
- * Deploy tenant site to CloudFront
+ * Deploy tenant site to CloudFront with individual distribution
  * @param {string} tenantId - Tenant identifier
  * @param {string} version - Version to deploy
  * @param {string} buildPath - S3 path to build artifacts
  */
 async function deployToCloudFront(tenantId, version, buildPath) {
   try {
-    logger.info(`Deploying ${tenantId} version ${version} to CloudFront`);
+    logger.info(`Deploying ${tenantId} version ${version} to tenant-specific CloudFront distribution`);
+
+    // Get or create CloudFront distribution for this tenant
+    const distribution = await TenantDistributionService.getOrCreateTenantDistribution(tenantId);
+    
+    logger.info('Using CloudFront distribution for tenant', {
+      tenantId,
+      distributionId: distribution.distributionId,
+      domain: distribution.domain
+    });
 
     // Update pointer file to new version
     await updateVersionPointer(tenantId, version);
 
-    // Invalidate CloudFront cache for tenant
-    await invalidateCloudFrontCache(tenantId);
+    // Invalidate tenant's CloudFront cache
+    await TenantDistributionService.invalidateTenantCache(tenantId);
 
-    logger.info(`CloudFront deployment completed for ${tenantId}`);
+    logger.info(`CloudFront deployment completed for ${tenantId}`, {
+      distributionId: distribution.distributionId,
+      deploymentUrl: distribution.deploymentUrl
+    });
+    
+    return {
+      distributionId: distribution.distributionId,
+      domain: distribution.domain,
+      deploymentUrl: distribution.deploymentUrl
+    };
     
   } catch (error) {
     logger.error(`CloudFront deployment failed for ${tenantId}:`, error);
@@ -27,7 +46,7 @@ async function deployToCloudFront(tenantId, version, buildPath) {
 }
 
 /**
- * Rollback deployment to previous version
+ * Rollback deployment to previous version with tenant-specific distribution
  * @param {string} tenantId - Tenant identifier
  * @param {string} targetVersion - Version to rollback to
  * @param {string} buildPath - S3 path to target build artifacts
@@ -39,8 +58,8 @@ async function rollbackDeployment(tenantId, targetVersion, buildPath) {
     // Update pointer to target version
     await updateVersionPointer(tenantId, targetVersion);
 
-    // Invalidate CloudFront cache
-    await invalidateCloudFrontCache(tenantId);
+    // Invalidate tenant's CloudFront cache
+    await TenantDistributionService.invalidateTenantCache(tenantId);
 
     logger.info(`Rollback completed for ${tenantId} to version ${targetVersion}`);
     
@@ -86,47 +105,39 @@ async function updateVersionPointer(tenantId, version) {
 }
 
 /**
- * Invalidate CloudFront cache for tenant
+ * Invalidate CloudFront cache for tenant's individual distribution
  * @param {string} tenantId - Tenant identifier
- * @returns {string} - Invalidation ID
+ * @param {string} buildId - Optional specific build to invalidate
+ * @returns {string|null} - Invalidation ID or null
  */
 async function invalidateCloudFrontCache(tenantId, buildId = null) {
   try {
-    const distributionId = process.env.AWS_CLOUDFRONT_DISTRIBUTION_ID;
+    logger.info('Attempting CloudFront invalidation for tenant-specific distribution', {
+      tenantId,
+      buildId
+    });
+
+    // Use the new tenant distribution service for cache invalidation
+    const invalidationId = await TenantDistributionService.invalidateTenantCache(tenantId, buildId);
     
-    if (!distributionId || distributionId === 'user-app-dev-distribution') {
-      logger.warn('CloudFront distribution ID not configured, skipping invalidation');
-      return null;
+    if (invalidationId) {
+      logger.info(`CloudFront invalidation created for tenant ${tenantId}: ${invalidationId}`);
+    } else {
+      logger.warn(`CloudFront invalidation skipped for tenant ${tenantId} (no distribution found)`);
     }
-
-    const invalidationPaths = buildId ? [
-      `/tenants/${tenantId}/deployments/${buildId}/*`,  // Specific build invalidation
-      `/pointers/${tenantId}/*`                         // Version pointers
-    ] : [
-      `/tenants/${tenantId}/deployments/*`,             // All tenant deployments
-      `/pointers/${tenantId}/*`                         // Version pointers
-    ];
-
-    const params = {
-      DistributionId: distributionId,
-      InvalidationBatch: {
-        Paths: {
-          Quantity: invalidationPaths.length,
-          Items: invalidationPaths
-        },
-        CallerReference: `${tenantId}-${Date.now()}`
-      }
-    };
-
-    const result = await cloudFront.createInvalidation(params).promise();
     
-    logger.info(`CloudFront invalidation created for ${tenantId}: ${result.Invalidation.Id}`);
-    
-    return result.Invalidation.Id;
+    return invalidationId;
     
   } catch (error) {
-    logger.error(`CloudFront invalidation failed for ${tenantId}:`, error);
-    throw error;
+    logger.error(`CloudFront invalidation failed for ${tenantId}:`, {
+      error: error.message,
+      code: error.code,
+      buildId
+    });
+    
+    // Return null instead of throwing to prevent build failures
+    // CloudFront invalidation is an optimization, not a requirement
+    return null;
   }
 }
 

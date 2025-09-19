@@ -10,6 +10,7 @@ const logger = require('../utils/logger');
 const { prisma } = require('../lib/prisma');
 const storageService = require('./storageService');
 const deploymentService = require('./deploymentService');
+const TenantDistributionService = require('./tenantDistributionService');
 
 /**
  * Multi-tenant Website Builder - Build Service
@@ -172,6 +173,13 @@ buildQueue.process('process-build', async (job) => {
       }
 
       logger.info('Build completed successfully', { buildId, deploymentId: deployment.id });
+
+      // 🌐 Log the live website URL
+      if (buildResult.deploymentUrl) {
+        logger.info('🌐 WEBSITE DEPLOYED SUCCESSFULLY!');
+        logger.info(`🔗 Live URL: ${buildResult.deploymentUrl}`);
+        logger.info(`📄 Index Page: ${buildResult.deploymentUrl.replace(/\/$/, '')}/index.html`);
+      }
 
     } else {
       // Update build status to failed
@@ -472,26 +480,39 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
 
     await uploadDirectoryToS3(staticExportPath, deploymentPath, buildId);
 
-    // 12. Update CloudFront deployment pointers and invalidate cache
+    // 12. Setup CloudFront distribution and deployment
     let cloudfrontInvalidationId = null;
+    let distributionInfo = null;
     try {
-      logger.info('Updating CloudFront deployment', { buildId, tenantId });
+      logger.info('Setting up CloudFront distribution for tenant', { buildId, tenantId });
       
-      // Update version pointer for CloudFront routing
+      // Get or create tenant-specific CloudFront distribution
+      distributionInfo = await TenantDistributionService.getOrCreateTenantDistribution(tenantId);
+      
+      logger.info('CloudFront distribution ready for tenant', {
+        buildId,
+        tenantId,
+        distributionId: distributionInfo.distributionId,
+        domain: distributionInfo.domain
+      });
+      
+      // Update version pointer for the deployment
       await deploymentService.updateVersionPointer(tenantId, buildId);
       
       // Invalidate CloudFront cache to ensure immediate deployment
-      cloudfrontInvalidationId = await deploymentService.invalidateCloudFrontCache(tenantId, buildId);
+      cloudfrontInvalidationId = await TenantDistributionService.invalidateTenantCache(tenantId, buildId);
       
       logger.info('CloudFront deployment completed', { 
         buildId,
         tenantId,
+        distributionId: distributionInfo.distributionId,
         invalidationId: cloudfrontInvalidationId 
       });
     } catch (cloudFrontError) {
       // Don't fail the build for CloudFront issues, but log the error
-      logger.warn('CloudFront deployment failed (build will continue)', { 
+      logger.warn('CloudFront distribution setup failed (build will continue)', { 
         buildId,
+        tenantId,
         error: cloudFrontError.message 
       });
     }
@@ -539,6 +560,14 @@ async function processBuild({ buildId, tenantId, storageKey, buildConfig }) {
       deploymentUrl,
       artifactsPath: deploymentPath
     });
+
+    // 🎉 Log the deployment URL prominently
+    logger.info('🎉 DEPLOYMENT SUCCESSFUL! 🎉');
+    logger.info('🌐 Your website is now live at:');
+    logger.info(`🔗 ${deploymentUrl}`);
+    logger.info('📄 Direct link to index page:');
+    logger.info(`🏠 ${deploymentUrl.replace(/\/$/, '')}/index.html`);
+    logger.info('✨ CloudFront distribution ready with tenant-specific domain!');
 
     return {
       success: true,
@@ -1103,71 +1132,68 @@ function getContentType(filename) {
 }
 
 /**
- * Generate deployment URL for the tenant
+ * Generate deployment URL for the tenant using individual CloudFront distribution
  */
 async function generateDeploymentUrl(tenantId, buildId, staticExportPath = null) {
   try {
-    const cloudfrontDomain = process.env.CLOUDFRONT_DOMAIN;
-    const baseDomain = process.env.BASE_DOMAIN || 'localhost:3000';
+    logger.info('Generating deployment URL for tenant', { tenantId, buildId });
     
-    // If CloudFront is configured, find the correct path to index.html
-    if (cloudfrontDomain && cloudfrontDomain !== 'dev-cloudfront-domain') {
-      let indexPath = '';
+    // Get or create CloudFront distribution for this tenant
+    const distribution = await TenantDistributionService.getOrCreateTenantDistribution(tenantId);
+    
+    if (distribution && distribution.domain) {
+      // Use tenant-specific CloudFront distribution
+      const baseUrl = `https://${distribution.domain}`;
+      let deploymentPath = `/deployments/${buildId}`;
       
-      // Try to find index.html in the exported files
+      // Try to find index.html in the exported files for better UX
       if (staticExportPath) {
         try {
           const indexHtmlPath = await findIndexHtmlPath(staticExportPath);
           if (indexHtmlPath) {
-            // Convert absolute path to relative path from staticExportPath
             const relativePath = path.relative(staticExportPath, indexHtmlPath);
-            // Convert Windows path separators to URL separators
-            indexPath = '/' + relativePath.replace(/\\/g, '/');
+            const urlPath = '/' + relativePath.replace(/\\/g, '/');
+            deploymentPath += urlPath;
           }
         } catch (error) {
-          logger.warn('Could not find index.html path, using root', { 
+          logger.warn('Could not find index.html path, using base deployment path', { 
             buildId, 
             error: error.message 
           });
         }
       }
       
-      const baseUrl = `https://${cloudfrontDomain}/tenants/${tenantId}/deployments/${buildId}`;
-      const fullUrl = baseUrl + indexPath;
+      const fullUrl = baseUrl + deploymentPath;
       
-      logger.info('Generated CloudFront URL with index path', { 
-        baseUrl, 
-        indexPath, 
-        fullUrl, 
-        tenantId, 
-        buildId 
+      logger.info('Generated tenant-specific CloudFront URL', { 
+        tenantId,
+        buildId,
+        distributionId: distribution.distributionId,
+        distributionDomain: distribution.domain,
+        deploymentUrl: fullUrl
       });
       
       return fullUrl;
     }
     
-    // Fallback for development/local testing
-    if (process.env.NODE_ENV === 'production') {
-      // Production without CloudFront: Use subdomain approach
-      const cleanDomain = baseDomain.replace(/^https?:\/\//, '');
-      return `https://${tenantId}.${cleanDomain}`;
-    } else {
-      // Development: Use path-based approach for local testing
-      const cleanDomain = baseDomain.replace(/^https?:\/\//, '');
-      return `http://${cleanDomain}/sites/${tenantId}/${buildId}`;
-    }
+    // Fallback to development/testing URL if CloudFront distribution creation failed
+    logger.warn('CloudFront distribution not available, using fallback URL', { tenantId, buildId });
+    
+    const bucketUrl = `https://${process.env.AWS_S3_BUCKET_STATIC}.s3.amazonaws.com`;
+    const fallbackUrl = `${bucketUrl}/tenants/${tenantId}/deployments/${buildId}/index.html`;
+    
+    return fallbackUrl;
+    
   } catch (error) {
     logger.error('Failed to generate deployment URL', { 
       error: error.message, 
       tenantId, 
       buildId 
     });
-    // Return basic CloudFront URL as fallback
-    const cloudfrontDomain = process.env.CLOUDFRONT_DOMAIN;
-    if (cloudfrontDomain) {
-      return `https://${cloudfrontDomain}/tenants/${tenantId}/deployments/${buildId}`;
-    }
-    return `${process.env.BASE_DOMAIN || 'http://localhost:3000'}/tenant/${tenantId}/deployment/${buildId}`;
+    
+    // Emergency fallback to S3 direct URL
+    const bucketUrl = `https://${process.env.AWS_S3_BUCKET_STATIC}.s3.amazonaws.com`;
+    return `${bucketUrl}/tenants/${tenantId}/deployments/${buildId}/index.html`;
   }
 }
 

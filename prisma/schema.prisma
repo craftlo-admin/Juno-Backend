@@ -31,32 +31,41 @@ model User {
 }
 
 model Tenant {
-  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId          String       @unique @map("tenant_id")
-  ownerId           String       @map("owner_id") @db.Uuid
-  name              String
-  status            String       @default("pending")
-  domain            String
-  customDomain      String?      @map("custom_domain")
-  currentVersion    String?      @map("current_version")
-  buildArtifactPath String?      @map("build_artifact_path")
-  description       String?
-  config            Json         @default("{}")
-  buildSettings     Json         @default("{}") @map("build_settings")
-  lastDeployedAt    DateTime?    @map("last_deployed_at")
-  createdAt         DateTime     @default(now()) @map("created_at")
-  updatedAt         DateTime     @updatedAt @map("updated_at")
-  auditLogs         AuditLog[]
-  builds            Build[]
-  deployments       Deployment[]
-  projects          Project[]
-  members           TenantMember[]
-  owner             User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  id                        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                  String       @unique @map("tenant_id")
+  ownerId                   String       @map("owner_id") @db.Uuid
+  name                      String
+  status                    String       @default("pending")
+  domain                    String
+  customDomain              String?      @map("custom_domain")
+  currentVersion            String?      @map("current_version")
+  buildArtifactPath         String?      @map("build_artifact_path")
+  description               String?
+  config                    Json         @default("{}")
+  buildSettings             Json         @default("{}") @map("build_settings")
+  
+  // CloudFront Distribution fields for tenant-specific distributions
+  cloudfrontDistributionId  String?      @map("cloudfront_distribution_id")
+  cloudfrontDomain          String?      @map("cloudfront_domain")
+  cloudfrontStatus          String?      @map("cloudfront_status")
+  cloudfrontUniqueId        String?      @map("cloudfront_unique_id")
+  cloudfrontCreatedAt       DateTime?    @map("cloudfront_created_at")
+  
+  lastDeployedAt            DateTime?    @map("last_deployed_at")
+  createdAt                 DateTime     @default(now()) @map("created_at")
+  updatedAt                 DateTime     @updatedAt @map("updated_at")
+  auditLogs                 AuditLog[]
+  builds                    Build[]
+  deployments               Deployment[]
+  projects                  Project[]
+  members                   TenantMember[]
+  owner                     User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
   @@index([ownerId])
   @@index([status])
   @@index([domain])
+  @@index([cloudfrontDistributionId])
   @@map("tenants")
 }
 
