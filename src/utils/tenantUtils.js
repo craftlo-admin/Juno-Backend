@@ -24,13 +24,25 @@ try {
  * @returns {Promise<string>} A unique and URL-friendly tenant ID.
  */
 const generateTenantId = async (name) => {
+  // Validate input
+  if (!name || typeof name !== 'string') {
+    throw new Error('Tenant name must be a non-empty string');
+  }
+
   // 1. Sanitize the name to be URL-friendly
   const sanitizedName = name
     .toLowerCase()
     .trim()
     .replace(/[^a-z0-9\s-]/g, '') // Remove special characters except spaces and hyphens
     .replace(/\s+/g, '-') // Replace spaces with hyphens
-    .replace(/-+/g, '-'); // Replace multiple hyphens with a single one
+    .replace(/-+/g, '-') // Replace multiple hyphens with a single one
+    .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
+
+  // Ensure we have a meaningful name after sanitization
+  const baseName = sanitizedName || 'tenant';
+  
+  // Ensure the base name isn't too long
+  const truncatedName = baseName.length > 30 ? baseName.substring(0, 30) : baseName;
 
   // 2. Generate a short, unique suffix using nanoid
   // This prevents collisions if two tenants have the same sanitized name.
@@ -38,7 +50,7 @@ const generateTenantId = async (name) => {
   const uniqueSuffix = nanoid();
 
   // 3. Combine them for the final tenant ID
-  const tenantId = `${sanitizedName}-${uniqueSuffix}`;
+  const tenantId = `${truncatedName}-${uniqueSuffix}`;
 
   return tenantId;
 };

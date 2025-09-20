@@ -146,6 +146,23 @@ class TenantController {
       const { tenantId } = req.params;
       const { userId } = req.user;
 
+      // First verify user has access to this tenant
+      const userMembership = await prisma.tenantMember.findFirst({
+        where: {
+          tenantId: tenantId,
+          userId: userId,
+          status: 'active'
+        }
+      });
+
+      if (!userMembership) {
+        return res.status(403).json({
+          error: 'Access denied',
+          message: 'You do not have permission to access this tenant'
+        });
+      }
+
+      // Now fetch tenant details
       const tenant = await prisma.tenant.findUnique({
         where: { tenantId },
         include: {
@@ -176,9 +193,6 @@ class TenantController {
         });
       }
 
-      // Get user's role in this tenant
-      const userMembership = tenant.members.find(m => m.userId === userId);
-
       const response = {
         id: tenant.id,
         tenantId: tenant.tenantId,
@@ -186,7 +200,7 @@ class TenantController {
         description: tenant.description,
         domain: tenant.domain,
         status: tenant.status,
-        userRole: userMembership?.role || 'none',
+        userRole: userMembership.role,
         owner: tenant.owner,
         members: tenant.members.map(m => ({
           id: m.id,
@@ -229,7 +243,25 @@ class TenantController {
       }
 
       const { tenantId } = req.params;
+      const { userId } = req.user;
       const { name, description } = req.body;
+
+      // Verify user has admin or owner permissions
+      const userMembership = await prisma.tenantMember.findFirst({
+        where: {
+          tenantId: tenantId,
+          userId: userId,
+          status: 'active',
+          role: { in: ['owner', 'admin'] }
+        }
+      });
+
+      if (!userMembership) {
+        return res.status(403).json({
+          error: 'Access denied',
+          message: 'You do not have permission to update this tenant'
+        });
+      }
 
       const updatedTenant = await prisma.tenant.update({
         where: { tenantId },
@@ -323,6 +355,23 @@ class TenantController {
   static async getMembers(req, res, next) {
     try {
       const { tenantId } = req.params;
+      const { userId } = req.user;
+
+      // Verify user has access to this tenant
+      const userMembership = await prisma.tenantMember.findFirst({
+        where: {
+          tenantId: tenantId,
+          userId: userId,
+          status: 'active'
+        }
+      });
+
+      if (!userMembership) {
+        return res.status(403).json({
+          error: 'Access denied',
+          message: 'You do not have permission to view members of this tenant'
+        });
+      }
 
       const tenant = await prisma.tenant.findUnique({
         where: { tenantId },
@@ -383,6 +432,23 @@ class TenantController {
       const { userId } = req.user;
       const { email, role } = req.body;
 
+      // Verify user has admin or owner permissions to invite
+      const userMembership = await prisma.tenantMember.findFirst({
+        where: {
+          tenantId: tenantId,
+          userId: userId,
+          status: 'active',
+          role: { in: ['owner', 'admin'] }
+        }
+      });
+
+      if (!userMembership) {
+        return res.status(403).json({
+          error: 'Access denied',
+          message: 'You do not have permission to invite members to this tenant'
+        });
+      }
+
       // Find user by email
       const userToInvite = await prisma.user.findUnique({
         where: { email }
@@ -399,7 +465,7 @@ class TenantController {
       const existingMembership = await prisma.tenantMember.findUnique({
         where: {
           tenantId_userId: {
-            tenantId: req.tenant.tenantId,
+            tenantId: tenantId,
             userId: userToInvite.id
           }
         }
@@ -415,7 +481,7 @@ class TenantController {
       // Create membership
       const membership = await prisma.tenantMember.create({
         data: {
-          tenantId: req.tenant.tenantId,
+          tenantId: tenantId,
           userId: userToInvite.id,
           role,
           status: 'active',

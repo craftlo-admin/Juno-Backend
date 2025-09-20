@@ -39,13 +39,18 @@ model User {
   lastLoginAt            DateTime?      @map("last_login_at")
   createdAt              DateTime       @default(now()) @map("created_at")
   updatedAt              DateTime       @updatedAt @map("updated_at")
+  
+  // Relations
   auditLogs              AuditLog[]
   tenants                Tenant[]
   uploadedFiles          UploadedFile[]
   tenantMemberships      TenantMember[]
   builds                 Build[]
+  createdProjects        Project[]      @relation("ProjectCreator") // Added: Projects created by this user
 
   @@index([email])
+  @@index([emailVerified]) // Added: Index for email verification queries
+  @@index([role]) // Added: Index for role-based queries
   @@map("users")
 }
 
@@ -55,8 +60,8 @@ model Tenant {
   ownerId                   String              @map("owner_id") @db.Uuid
   name                      String
   status                    String              @default("pending")
-  domain                    String
-  customDomain              String?             @map("custom_domain")
+  domain                    String              @unique // Added unique constraint to prevent domain conflicts
+  customDomain              String?             @unique @map("custom_domain") // Added unique constraint
   currentVersion            String?             @map("current_version")
   buildArtifactPath         String?             @map("build_artifact_path")
   description               String?
@@ -64,14 +69,14 @@ model Tenant {
   buildSettings             Json                @default("{}") @map("build_settings")
   
   // CloudFront Distribution fields for tenant-specific distributions
-  cloudfrontDistributionId  String?             @map("cloudfront_distribution_id")
-  cloudfrontDomain          String?             @map("cloudfront_domain")
+  cloudfrontDistributionId  String?             @unique @map("cloudfront_distribution_id") // Added unique constraint
+  cloudfrontDomain          String?             @unique @map("cloudfront_domain") // Added unique constraint
   cloudfrontStatus          String?             @map("cloudfront_status")
-  cloudfrontUniqueId        String?             @map("cloudfront_unique_id")
+  cloudfrontUniqueId        String?             @unique @map("cloudfront_unique_id") // Added unique constraint
   cloudfrontCreatedAt       DateTime?           @map("cloudfront_created_at")
   
   // Primary domain used for deployments (custom domain or CloudFront)
-  primaryDomain             String?             @map("primary_domain")
+  primaryDomain             String?             @unique @map("primary_domain") // Added unique constraint
   
   // Deployment Strategy Configuration (NEW)
   deploymentStrategy        DeploymentStrategy? @map("deployment_strategy")
@@ -84,22 +89,26 @@ model Tenant {
   lastDeployedAt            DateTime?           @map("last_deployed_at")
   createdAt                 DateTime            @default(now()) @map("created_at")
   updatedAt                 DateTime            @updatedAt @map("updated_at")
+  
+  // Relations
   auditLogs                 AuditLog[]
   builds                    Build[]
   deployments               Deployment[]
   projects                  Project[]
   members                   TenantMember[]
-  owner                     User                @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  owner                     User                @relation(fields: [ownerId], references: [id], onDelete: Restrict) // Changed to Restrict for safety
 
   @@index([tenantId])
   @@index([ownerId])
   @@index([status])
   @@index([domain])
+  @@index([customDomain]) // Added: Index for custom domain lookups
   @@index([cloudfrontDistributionId])
   @@index([deploymentStrategy])
   @@index([subscriptionTier])
   @@index([trafficTier])
   @@index([subscriptionTier, deploymentStrategy, trafficTier], name: "strategy_selection_idx")
+  @@index([status, subscriptionTier]) // Added: Composite index for filtering active tenants by tier
   @@map("tenants")
 }
 
@@ -125,9 +134,11 @@ model Build {
   createdAt    DateTime     @default(now()) @map("created_at")
   updatedAt    DateTime     @updatedAt @map("updated_at")
   projectId    String?      @map("project_id") @db.Uuid
-  project      Project?     @relation(fields: [projectId], references: [id])
+  
+  // Relations
+  project      Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull) // Changed to SetNull for safety
   tenant       Tenant       @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Restrict) // Changed to Restrict for audit trail
   deployments  Deployment[]
 
   @@index([tenantId])
@@ -135,7 +146,10 @@ model Build {
   @@index([projectId])
   @@index([status])
   @@index([version])
+  @@index([framework]) // Added: Index for framework-based queries
   @@index([tenantId, startedAt])
+  @@index([tenantId, status, createdAt]) // Added: Composite index for tenant build status queries
+  @@index([userId, status]) // Added: Index for user build history
   @@map("builds")
 }
 
@@ -153,15 +167,21 @@ model Deployment {
   createdAt                DateTime @default(now()) @map("created_at")
   updatedAt                DateTime @updatedAt @map("updated_at")
   projectId                String?  @map("project_id") @db.Uuid
-  build                    Build?   @relation(fields: [buildId], references: [id], onDelete: Cascade)
-  project                  Project? @relation(fields: [projectId], references: [id])
+  
+  // Relations
+  build                    Build?   @relation(fields: [buildId], references: [id], onDelete: SetNull) // Changed to SetNull for safety
+  project                  Project? @relation(fields: [projectId], references: [id], onDelete: SetNull) // Changed to SetNull for safety
   tenant                   Tenant   @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
 
   @@index([tenantId])
   @@index([projectId])
   @@index([status])
   @@index([buildId])
+  @@index([version]) // Added: Index for version-based queries
+  @@index([deployer]) // Added: Index for deployer-based queries
   @@index([tenantId, deployedAt])
+  @@index([tenantId, status, deployedAt]) // Added: Composite index for tenant deployment status queries
+  @@index([projectId, deployedAt]) // Added: Index for project deployment history
   @@map("deployments")
 }
 
@@ -194,7 +214,7 @@ model UploadedFile {
   mimeType    String
   s3Key       String   @unique
   s3Bucket    String
-  url         String
+  url         String   @unique // Added unique constraint to prevent URL conflicts
   description String?
   tags        String[]
   isPublic    Boolean  @default(false)
@@ -203,13 +223,19 @@ model UploadedFile {
   projectId   String?  @db.Uuid
   uploadedAt  DateTime @default(now())
   updatedAt   DateTime @updatedAt
-  project     Project? @relation(fields: [projectId], references: [id])
+  
+  // Relations
+  project     Project? @relation(fields: [projectId], references: [id], onDelete: SetNull) // Changed to SetNull for safety
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([projectId])
   @@index([uploadedAt])
   @@index([mimeType])
+  @@index([isPublic]) // Added: Index for public file queries
+  @@index([s3Bucket]) // Added: Index for bucket-based queries
+  @@index([fileSize]) // Added: Index for size-based queries and cleanup
+  @@index([userId, uploadedAt]) // Added: Composite index for user file history
   @@map("uploaded_files")
 }
 
@@ -217,18 +243,27 @@ model Project {
   id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name          String
   description   String?
+  zipFileKey    String?        @map("zip_file_key") // Added: ZIP file reference for project source
+  status        String         @default("ACTIVE") // Added: Project status (ACTIVE, INACTIVE, DELETED)
   settings      Json           @default("{}")
   tenantId      String         @map("tenant_id")
+  createdBy     String         @map("created_by") @db.Uuid // Added: User who created the project
   createdAt     DateTime       @default(now()) @map("created_at")
   updatedAt     DateTime       @updatedAt @map("updated_at")
+  
+  // Relations
   builds        Build[]
   deployments   Deployment[]
   tenant        Tenant         @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+  creator       User           @relation("ProjectCreator", fields: [createdBy], references: [id], onDelete: Restrict) // Added relation
   uploadedFiles UploadedFile[]
 
   @@index([tenantId])
+  @@index([createdBy]) // Added: Index for creator queries
+  @@index([status]) // Added: Index for status filtering
   @@index([name])
   @@index([tenantId, createdAt])
+  @@index([tenantId, status]) // Added: Composite index for tenant + status queries
   @@map("projects")
 }
 
@@ -253,3 +288,5 @@ model TenantMember {
   @@index([status])
   @@map("tenant_members")
 }
+
+// Schema fixes have been applied - see documentation for details

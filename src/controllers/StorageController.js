@@ -4,6 +4,52 @@ const logger = require('../utils/logger');
 const storageService = require('../services/storageService');
 const { isAwsConfigured } = require('../config/aws');
 
+/**
+ * Utility function to determine the correct S3 bucket based on prefix/path
+ * @param {string} prefix - The file prefix or path
+ * @returns {string} - The appropriate bucket name
+ */
+function getBucketForPrefix(prefix) {
+  if (prefix && prefix.startsWith('builds/')) {
+    return process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME;
+  } else if (prefix && prefix.startsWith('deployments/')) {
+    return process.env.AWS_S3_BUCKET_STATIC || process.env.AWS_S3_BUCKET_NAME;
+  }
+  return process.env.AWS_S3_BUCKET_STATIC || process.env.AWS_S3_BUCKET_NAME;
+}
+
+/**
+ * Utility function to transform S3 objects with metadata
+ * @param {Array} objects - Raw S3 objects
+ * @param {string} tenantId - Tenant ID for path calculation
+ * @param {Object} tenantInfo - Optional tenant info for aggregation
+ * @returns {Array} - Transformed objects
+ */
+function transformS3Objects(objects, tenantId, tenantInfo = null) {
+  return (objects || []).map(obj => {
+    const relativePath = obj.Key.replace(`tenants/${tenantId}/`, '');
+    const objectBucket = getBucketForPrefix(relativePath);
+
+    const result = {
+      key: obj.Key,
+      relativePath: relativePath,
+      size: obj.Size,
+      lastModified: obj.LastModified,
+      storageClass: obj.StorageClass,
+      etag: obj.ETag?.replace(/"/g, ''), // Remove quotes
+      url: isAwsConfigured ? `https://${objectBucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${obj.Key}` : null
+    };
+
+    // Add tenant info for multi-tenant aggregation
+    if (tenantInfo) {
+      result.tenantId = tenantId;
+      result.tenantName = tenantInfo.name;
+    }
+
+    return result;
+  });
+}
+
 class StorageController {
   /**
    * List S3 objects for a specific tenant
@@ -22,10 +68,8 @@ class StorageController {
 
       const s3Prefix = `tenants/${tenantId}/${prefix}`;
 
-      // Determine which bucket to use based on prefix
-      const bucket = prefix && prefix.startsWith('builds/') 
-        ? process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME
-        : process.env.AWS_S3_BUCKET_STATIC || process.env.AWS_S3_BUCKET_NAME;
+      // Use optimized bucket determination
+      const bucket = getBucketForPrefix(prefix);
 
       logger.info('📦 Storage service call', {
         bucket,
@@ -36,7 +80,7 @@ class StorageController {
       const objects = await storageService.listS3Objects({
         bucket: bucket,
         prefix: s3Prefix,
-        maxKeys: parseInt(maxKeys),
+        maxKeys: Math.max(1, Math.min(parseInt(maxKeys) || 100, 1000)), // Validate and limit
         startAfter: startAfter
       });
 
@@ -46,27 +90,8 @@ class StorageController {
         firstObject: objects?.[0] || null
       });
 
-      // Transform objects to include useful metadata
-      const transformedObjects = objects.map(obj => {
-        // Determine correct bucket for URL generation
-        const relativePath = obj.Key.replace(`tenants/${tenantId}/`, '');
-        let objectBucket = bucket;
-        if (relativePath.startsWith('builds/')) {
-          objectBucket = process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME;
-        } else if (relativePath.startsWith('deployments/')) {
-          objectBucket = process.env.AWS_S3_BUCKET_STATIC || process.env.AWS_S3_BUCKET_NAME;
-        }
-
-        return {
-          key: obj.Key,
-          relativePath: relativePath,
-          size: obj.Size,
-          lastModified: obj.LastModified,
-          storageClass: obj.StorageClass,
-          etag: obj.ETag?.replace(/"/g, ''), // Remove quotes
-          url: isAwsConfigured ? `https://${objectBucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${obj.Key}` : null
-        };
-      });
+      // Transform objects using utility function
+      const transformedObjects = transformS3Objects(objects, tenantId);
 
       // Group by type (builds, deployments, etc.)
       const groupedObjects = {
@@ -221,7 +246,7 @@ class StorageController {
         }
       ].filter(b => b.bucket); // Only include configured buckets
 
-      logger.info(`Attempting to delete S3 object:`, {
+      logger.info(`🗑️ Attempting comprehensive deletion for S3 object:`, {
         tenantId: tenantId,
         objectPath: objectPath,
         s3Key: s3Key,
@@ -242,7 +267,7 @@ class StorageController {
           
           foundBucket = bucketInfo;
           objectExists = true;
-          logger.info(`Object found in ${bucketInfo.name} bucket: ${bucketInfo.bucket}`);
+          logger.info(`📦 Object found in ${bucketInfo.name} bucket: ${bucketInfo.bucket}`);
           break;
         } catch (error) {
           logger.debug(`Object not found in ${bucketInfo.name} bucket (${bucketInfo.bucket}):`, error.message);
@@ -252,7 +277,7 @@ class StorageController {
 
       // If object not found in any bucket, return detailed 404
       if (!objectExists) {
-        logger.error(`Object not found in any bucket: ${s3Key}`);
+        logger.error(`❌ Object not found in any bucket: ${s3Key}`);
         return res.status(404).json({
           error: 'Object not found',
           message: 'The specified S3 object does not exist in any configured bucket',
@@ -270,59 +295,414 @@ class StorageController {
         });
       }
 
-      // Delete the object from the found bucket
-      await storageService.deleteFromS3({
-        bucket: foundBucket.bucket,
-        key: s3Key
-      });
-
-      // If this is a build source file, update the build record
-      let databaseUpdates = {
-        buildRecordUpdated: false,
-        action: 'none'
+      // ✅ ENHANCED: Comprehensive cleanup logic
+      const cleanupResults = {
+        s3Deletion: false,
+        buildCleanup: { performed: false, details: [] },
+        deploymentCleanup: { performed: false, details: [] },
+        cloudfrontInvalidation: { performed: false, details: [] },
+        domainCleanup: { performed: false, details: [] },
+        relatedFilesCleanup: { performed: false, details: [] }
       };
 
-      if (objectPath.includes('/builds/') && objectPath.endsWith('/source.zip')) {
-        const buildIdMatch = objectPath.match(/builds\/([^\/]+)\/source\.zip$/);
+      // 1. Delete the primary S3 object
+      try {
+        await storageService.deleteFromS3({
+          bucket: foundBucket.bucket,
+          key: s3Key
+        });
+        cleanupResults.s3Deletion = true;
+        logger.info(`✅ Primary S3 object deleted: ${s3Key}`);
+      } catch (s3Error) {
+        logger.error(`❌ Failed to delete S3 object:`, s3Error);
+        throw new Error(`S3 deletion failed: ${s3Error.message}`);
+      }
+
+      // 2. ✅ ENHANCED: Handle build-related deletions
+      logger.info(`🔍 DEBUG: About to check build path conditions for: ${objectPath}`);
+      logger.info(`🔍 DEBUG: includes('/builds/'): ${objectPath.includes('/builds/')}`);
+      logger.info(`🔍 DEBUG: includes('builds/'): ${objectPath.includes('builds/')}`);
+      logger.info(`🔍 DEBUG: Combined condition: ${objectPath.includes('/builds/') || objectPath.includes('builds/')}`);
+      
+      if (objectPath.includes('/builds/') || objectPath.includes('builds/')) {
+        logger.info(`🎯 DEBUG: ENTERED BUILD DELETION LOGIC!`);
+        const buildIdMatch = objectPath.match(/builds\/([^\/]+)/);
+        logger.info(`🔍 Build ID regex match result:`, buildIdMatch);
+        
         if (buildIdMatch) {
           const buildId = buildIdMatch[1];
+          
+          logger.info(`🔍 Processing build deletion for buildId: ${buildId}`);
+          logger.info(`🔍 Extracted tenantId: ${tenantId}`);
+          logger.info(`🔍 Full object path: ${objectPath}`);
+          logger.info(`🔍 Full S3 key: ${s3Key}`);
+          
           try {
-            const updatedBuild = await prisma.build.update({
+            // Find the build record (might not exist)
+            const build = await prisma.build.findUnique({
               where: { id: buildId },
-              data: { 
-                sourceFile: null,
-                status: 'source_deleted',
-                updatedAt: new Date()
+              include: {
+                deployments: true,
+                project: true
               }
             });
+
+            // ✅ ALWAYS perform complete tenant deletion regardless of build record existence
+            logger.info(`🗑️ Starting complete tenant deletion for: ${tenantId} (triggered by build deletion)`);
             
-            databaseUpdates = {
-              buildRecordUpdated: true,
-              buildId: buildId,
-              action: 'source_file_deleted',
-              previousStatus: updatedBuild.status,
-              newStatus: 'source_deleted'
-            };
+            // Get full tenant information before deletion
+            const tenant = await prisma.tenant.findUnique({
+              where: { tenantId: tenantId },
+              include: {
+                builds: true,
+                deployments: true,
+                projects: true,
+                members: true,
+                auditLogs: true
+              }
+            });
+
+            if (tenant) {
+              const deletionSummary = {
+                tenantInfo: {
+                  tenantId: tenant.tenantId,
+                  name: tenant.name,
+                  domain: tenant.domain,
+                  customDomain: tenant.customDomain,
+                  cloudfrontDistributionId: tenant.cloudfrontDistributionId,
+                  cloudfrontDomain: tenant.cloudfrontDomain
+                },
+                counts: {
+                  builds: tenant.builds.length,
+                  deployments: tenant.deployments.length,
+                  projects: tenant.projects.length,
+                  members: tenant.members.length,
+                  auditLogs: tenant.auditLogs.length
+                }
+              };
+
+              // Delete ALL S3 objects for this tenant across all buckets
+              logger.info(`🗂️ Deleting ALL S3 objects for tenant: ${tenantId}`);
+              const tenantS3Prefix = `tenants/${tenantId}/`;
+              
+              // CRITICAL: Also delete root-level tenant files (like the deployed website)
+              const rootTenantPrefix = `${tenantId}/`; // For files stored directly under tenantId/
+              
+              for (const bucketInfo of bucketsToSearch) {
+                try {
+                  // Delete files under tenants/tenantId/ prefix
+                  const allTenantObjects = await storageService.listS3Objects({
+                    bucket: bucketInfo.bucket,
+                    prefix: tenantS3Prefix,
+                    maxKeys: 1000 // Get all objects
+                  });
+
+                  // Delete files under tenantId/ prefix (root level)
+                  const rootTenantObjects = await storageService.listS3Objects({
+                    bucket: bucketInfo.bucket,
+                    prefix: rootTenantPrefix,
+                    maxKeys: 1000 // Get all objects
+                  });
+
+                  const allObjectsToDelete = [
+                    ...(allTenantObjects || []),
+                    ...(rootTenantObjects || [])
+                  ];
+
+                  // Delete all objects in efficient batches (up to 1000 per batch)
+                  if (allObjectsToDelete && allObjectsToDelete.length > 0) {
+                    logger.info(`📦 Found ${allObjectsToDelete.length} objects in ${bucketInfo.name} bucket to delete`);
+                    
+                    // Use batch deletion for efficiency (AWS supports up to 1000 objects per batch)
+                    const batchSize = 1000;
+                    const batches = [];
+                    
+                    for (let i = 0; i < allObjectsToDelete.length; i += batchSize) {
+                      batches.push(allObjectsToDelete.slice(i, i + batchSize));
+                    }
+
+                    logger.info(`🚀 Deleting ${allObjectsToDelete.length} objects in ${batches.length} batch(es)`);
+
+                    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+                      const batch = batches[batchIndex];
+                      try {
+                        // Prepare batch delete request
+                        const deleteObjects = batch.map(obj => ({ Key: obj.Key }));
+                        
+                        // Use AWS SDK batch delete (much faster than individual deletes)
+                        const deleteResult = await storageService.batchDeleteFromS3({
+                          bucket: bucketInfo.bucket,
+                          objects: deleteObjects
+                        });
+
+                        logger.info(`✅ Batch ${batchIndex + 1}/${batches.length}: Deleted ${batch.length} objects from ${bucketInfo.name}`);
+                        
+                        // Add to cleanup results (summarized, not individual files)
+                        cleanupResults.relatedFilesCleanup.details.push({
+                          batch: batchIndex + 1,
+                          bucket: bucketInfo.bucket,
+                          objectsDeleted: batch.length,
+                          totalSize: batch.reduce((sum, obj) => sum + (obj.Size || 0), 0),
+                          status: 'batch_deleted'
+                        });
+
+                      } catch (batchError) {
+                        logger.error(`❌ Batch ${batchIndex + 1} deletion failed for ${bucketInfo.name}:`, batchError);
+                        
+                        // Fallback to individual deletion for this batch
+                        logger.info(`🔄 Falling back to individual deletion for batch ${batchIndex + 1}`);
+                        for (const obj of batch) {
+                          try {
+                            await storageService.deleteFromS3({
+                              bucket: bucketInfo.bucket,
+                              key: obj.Key
+                            });
+                          } catch (individualError) {
+                            logger.warn(`❌ Failed to delete individual object ${obj.Key}:`, individualError.message);
+                          }
+                        }
+                        
+                        cleanupResults.relatedFilesCleanup.details.push({
+                          batch: batchIndex + 1,
+                          bucket: bucketInfo.bucket,
+                          objectsDeleted: batch.length,
+                          status: 'individual_fallback',
+                          error: batchError.message
+                        });
+                      }
+                    }
+                    logger.info(`✅ Processed all ${allObjectsToDelete.length} objects from ${bucketInfo.name} bucket`);
+                  }
+                } catch (listError) {
+                  logger.warn(`⚠️ Failed to list objects in ${bucketInfo.name} bucket:`, listError);
+                }
+              }
+              cleanupResults.relatedFilesCleanup.performed = true;
+
+              // CloudFront cleanup
+              if (tenant.cloudfrontDistributionId) {
+                logger.info(`☁️ Processing CloudFront distribution: ${tenant.cloudfrontDistributionId}`);
+                
+                try {
+                  // 1. Create CloudFront invalidation to clear all cached content
+                  logger.info(`🔄 Creating CloudFront invalidation for distribution: ${tenant.cloudfrontDistributionId}`);
+                  
+                  const invalidationResult = await storageService.createCloudfrontInvalidation({
+                    distributionId: tenant.cloudfrontDistributionId,
+                    paths: ['/*'] // Invalidate all paths
+                  });
+                  
+                  logger.info(`✅ CloudFront invalidation created: ${invalidationResult.invalidationId}`);
+                  
+                  // 2. Disable the CloudFront distribution to stop serving content
+                  logger.info(`🚫 Disabling CloudFront distribution: ${tenant.cloudfrontDistributionId}`);
+                  
+                  const disableResult = await storageService.disableCloudfrontDistribution({
+                    distributionId: tenant.cloudfrontDistributionId
+                  });
+                  
+                  logger.info(`✅ CloudFront distribution disabled: ${tenant.cloudfrontDistributionId}`);
+                  
+                  cleanupResults.cloudfrontInvalidation.details.push({
+                    distributionId: tenant.cloudfrontDistributionId,
+                    domain: tenant.cloudfrontDomain,
+                    customDomain: tenant.customDomain,
+                    invalidationId: invalidationResult.invalidationId,
+                    action: 'invalidated_and_disabled',
+                    status: 'success'
+                  });
+                  
+                } catch (cloudfrontError) {
+                  logger.error(`❌ CloudFront cleanup failed for ${tenant.cloudfrontDistributionId}:`, cloudfrontError);
+                  
+                  cleanupResults.cloudfrontInvalidation.details.push({
+                    distributionId: tenant.cloudfrontDistributionId,
+                    domain: tenant.cloudfrontDomain,
+                    customDomain: tenant.customDomain,
+                    action: 'cleanup_failed',
+                    error: cloudfrontError.message,
+                    status: 'error'
+                  });
+                }
+                cleanupResults.cloudfrontInvalidation.performed = true;
+              }
+
+              // Database cascade deletion (in proper order to handle foreign keys)
+              logger.info(`🗄️ Starting database cascade deletion for tenant: ${tenantId}`);
+
+              // Delete audit logs first (no dependencies)
+              if (tenant.auditLogs.length > 0) {
+                const deletedAuditLogs = await prisma.auditLog.deleteMany({
+                  where: { tenantId: tenantId }
+                });
+                logger.info(`✅ Deleted ${deletedAuditLogs.count} audit logs`);
+              }
+
+              // Delete deployments (depend on builds)
+              if (tenant.deployments.length > 0) {
+                const deletedDeployments = await prisma.deployment.deleteMany({
+                  where: { tenantId: tenantId }
+                });
+                cleanupResults.deploymentCleanup.details = tenant.deployments.map(d => ({
+                  deploymentId: d.id,
+                  version: d.version,
+                  status: 'deleted'
+                }));
+                cleanupResults.deploymentCleanup.performed = true;
+                logger.info(`✅ Deleted ${deletedDeployments.count} deployments`);
+              }
+
+              // Delete builds
+              if (tenant.builds.length > 0) {
+                const deletedBuilds = await prisma.build.deleteMany({
+                  where: { tenantId: tenantId }
+                });
+                cleanupResults.buildCleanup.details = tenant.builds.map(b => ({
+                  buildId: b.id,
+                  version: b.version,
+                  status: 'deleted',
+                  action: 'full_tenant_deletion'
+                }));
+                cleanupResults.buildCleanup.performed = true;
+                logger.info(`✅ Deleted ${deletedBuilds.count} builds`);
+              }
+
+              // Delete uploaded files associated with tenant projects
+              const uploadedFilesCount = await prisma.uploadedFile.deleteMany({
+                where: {
+                  project: {
+                    tenantId: tenantId
+                  }
+                }
+              });
+              if (uploadedFilesCount.count > 0) {
+                logger.info(`✅ Deleted ${uploadedFilesCount.count} uploaded files`);
+              }
+
+              // Delete projects
+              if (tenant.projects.length > 0) {
+                const deletedProjects = await prisma.project.deleteMany({
+                  where: { tenantId: tenantId }
+                });
+                logger.info(`✅ Deleted ${deletedProjects.count} projects`);
+              }
+
+              // Delete tenant members
+              if (tenant.members.length > 0) {
+                const deletedMembers = await prisma.tenantMember.deleteMany({
+                  where: { tenantId: tenantId }
+                });
+                logger.info(`✅ Deleted ${deletedMembers.count} tenant members`);
+              }
+
+              // Finally, delete the tenant itself
+              await prisma.tenant.delete({
+                where: { tenantId: tenantId }
+              });
+              logger.info(`🎯 TENANT RECORD DELETED: ${tenantId}`);
+
+              cleanupResults.domainCleanup.performed = true;
+              cleanupResults.domainCleanup.details.push({
+                action: 'complete_tenant_deletion',
+                tenantId: tenantId,
+                domain: tenant.domain,
+                customDomain: tenant.customDomain,
+                deletionSummary: deletionSummary
+              });
+
+              logger.info(`🎉 COMPLETE TENANT DELETION SUCCESSFUL`, {
+                tenantId: tenantId,
+                domain: tenant.domain,
+                customDomain: tenant.customDomain,
+                cloudfrontDistribution: tenant.cloudfrontDistributionId,
+                totalBuilds: deletionSummary.counts.builds,
+                totalDeployments: deletionSummary.counts.deployments,
+                totalProjects: deletionSummary.counts.projects,
+                totalMembers: deletionSummary.counts.members,
+                s3ObjectsDeleted: cleanupResults.relatedFilesCleanup.details.length
+              });
+
+            } else {
+              logger.warn(`⚠️ Tenant ${tenantId} not found in database during deletion`);
+            }
+
+          } catch (tenantDeletionError) {
+            logger.error(`❌ CRITICAL: Complete tenant deletion failed for ${tenantId}:`, tenantDeletionError);
+            cleanupResults.domainCleanup.details.push({
+              action: 'tenant_deletion_failed',
+              tenantId: tenantId,
+              error: tenantDeletionError.message,
+              critical: true
+            });
             
-            logger.info(`Updated build ${buildId} status after source deletion`);
-          } catch (dbError) {
-            logger.warn(`Failed to update build ${buildId} after source deletion:`, dbError);
-            databaseUpdates.error = `Database update failed: ${dbError.message}`;
+            // Don't throw here - we want to return partial success info
           }
         }
       }
 
-      logger.info(`S3 object deleted successfully: ${s3Key}`, {
+      // 3. ✅ ENHANCED: Handle deployment-related deletions
+      if (objectPath.includes('/deployments/')) {
+        const deploymentMatch = objectPath.match(/deployments\/([^\/]+)/);
+        if (deploymentMatch) {
+          const deploymentId = deploymentMatch[1];
+          
+          try {
+            const deployment = await prisma.deployment.findUnique({
+              where: { id: deploymentId }
+            });
+
+            if (deployment) {
+              // Delete deployment record
+              await prisma.deployment.delete({
+                where: { id: deploymentId }
+              });
+
+              cleanupResults.deploymentCleanup.performed = true;
+              cleanupResults.deploymentCleanup.details.push({
+                deploymentId: deploymentId,
+                version: deployment.version,
+                status: 'deleted'
+              });
+
+              // CloudFront invalidation
+              if (deployment.cloudfrontInvalidationId) {
+                cleanupResults.cloudfrontInvalidation.performed = true;
+                cleanupResults.cloudfrontInvalidation.details.push({
+                  deploymentId: deploymentId,
+                  invalidationId: deployment.cloudfrontInvalidationId,
+                  status: 'invalidation_recorded'
+                });
+              }
+            }
+          } catch (deploymentError) {
+            logger.error(`Deployment cleanup failed:`, deploymentError);
+            cleanupResults.deploymentCleanup.details.push({
+              deploymentId: deploymentId,
+              status: 'error',
+              error: deploymentError.message
+            });
+          }
+        }
+      }
+
+      logger.info(`🎉 Comprehensive deletion completed for: ${s3Key}`, {
         tenantId: tenantId,
         userId: req.user.userId,
         objectPath: objectPath,
         bucket: foundBucket.bucket,
-        bucketType: foundBucket.name
+        bucketType: foundBucket.name,
+        cleanupSummary: {
+          s3Deletion: cleanupResults.s3Deletion,
+          buildsAffected: cleanupResults.buildCleanup.details.length,
+          deploymentsAffected: cleanupResults.deploymentCleanup.details.length,
+          relatedFilesDeleted: cleanupResults.relatedFilesCleanup.details.length,
+          cloudfrontInvalidations: cleanupResults.cloudfrontInvalidation.details.length
+        }
       });
 
       res.json({
         success: true,
-        message: 'Object deleted successfully',
+        message: 'Object and related resources deleted successfully',
         data: {
           deletedObject: {
             key: s3Key,
@@ -335,12 +715,21 @@ class StorageController {
             bucketDescription: foundBucket.description,
             deletedAt: new Date().toISOString()
           },
-          databaseUpdates: databaseUpdates
+          cleanupResults: cleanupResults,
+          summary: {
+            totalOperations: [
+              cleanupResults.s3Deletion ? 1 : 0,
+              cleanupResults.buildCleanup.details.length,
+              cleanupResults.deploymentCleanup.details.length,
+              cleanupResults.relatedFilesCleanup.details.length
+            ].reduce((a, b) => a + b, 0),
+            message: 'Comprehensive cleanup performed including S3 files, database records, and related resources'
+          }
         }
       });
 
     } catch (error) {
-      logger.error('Delete S3 object error:', error);
+      logger.error('🚨 Comprehensive delete operation failed:', error);
       next(error);
     }
   }
@@ -699,24 +1088,37 @@ class StorageController {
   /**
    * TEMPORARY: Backward compatibility for old frontend calls without tenant ID
    * TODO: Remove once frontend is updated to use tenant-specific routes
+   * PERFORMANCE: Limited to prevent abuse - max 5 tenants, 50 objects per tenant
    */
   static async listObjectsCompatibility(req, res, next) {
     try {
       const { userId } = req.user;
       const { prefix = '', maxKeys = 100, startAfter = '' } = req.query;
 
-      // Find ALL user's active tenants, not just the first one
+      // Performance and security limits
+      const maxTenantsToProcess = 5; // Reduced from 10 for better performance
+      const maxKeysPerTenant = 50; // Limit per tenant
+      const maxTotalKeys = Math.min(parseInt(maxKeys), 250); // Overall limit
+
+      // Find user's active tenants with optimized query
       const tenantMemberships = await prisma.tenantMember.findMany({
         where: { 
           userId: userId,
           status: 'active'
         },
         include: {
-          tenant: true
+          tenant: {
+            select: {
+              tenantId: true,
+              name: true,
+              status: true
+            }
+          }
         },
         orderBy: {
           joinedAt: 'asc'
-        }
+        },
+        take: maxTenantsToProcess // Limit at database level
       });
 
       if (!tenantMemberships || tenantMemberships.length === 0) {
@@ -755,63 +1157,41 @@ class StorageController {
       logger.info('📁 Aggregating storage from multiple tenants', {
         userId,
         tenantCount: tenantMemberships.length,
-        tenantIds: tenantMemberships.map(t => t.tenant.tenantId)
+        tenantIds: tenantMemberships.map(t => t.tenant.tenantId),
+        limits: { maxTenantsToProcess, maxKeysPerTenant, maxTotalKeys }
       });
 
-      // Aggregate objects from all tenants
+      // Aggregate objects from all tenants with proper limits
       let allObjects = [];
       let totalProcessed = 0;
-      const maxKeysNum = parseInt(maxKeys);
+
+      // Use optimized bucket determination
+      const bucket = getBucketForPrefix(prefix);
 
       for (const tenantMembership of tenantMemberships) {
-        if (totalProcessed >= maxKeysNum) break;
+        if (totalProcessed >= maxTotalKeys) break;
 
         const tenantId = tenantMembership.tenant.tenantId;
         const s3Prefix = `tenants/${tenantId}/${prefix}`;
 
-        // Determine which bucket to use based on prefix
-        const bucket = prefix && prefix.startsWith('builds/') 
-          ? process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME
-          : process.env.AWS_S3_BUCKET_STATIC || process.env.AWS_S3_BUCKET_NAME;
-
         try {
-          const remainingKeys = maxKeysNum - totalProcessed;
+          const remainingKeys = maxTotalKeys - totalProcessed;
           const objects = await storageService.listS3Objects({
             bucket: bucket,
             prefix: s3Prefix,
-            maxKeys: Math.min(remainingKeys, 50), // Limit per tenant
+            maxKeys: Math.min(remainingKeys, maxKeysPerTenant),
             startAfter: startAfter
           });
 
-          logger.info('📦 Fetched objects from tenant', {
+          logger.debug('📦 Fetched objects from tenant', {
             tenantId,
             objectCount: objects?.length || 0,
             bucket,
             s3Prefix
           });
 
-          // Transform objects to include useful metadata and tenant info
-          const transformedObjects = (objects || []).map(obj => {
-            const relativePath = obj.Key.replace(`tenants/${tenantId}/`, '');
-            let objectBucket = bucket;
-            if (relativePath.startsWith('builds/')) {
-              objectBucket = process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME;
-            } else if (relativePath.startsWith('deployments/')) {
-              objectBucket = process.env.AWS_S3_BUCKET_STATIC || process.env.AWS_S3_BUCKET_NAME;
-            }
-
-            return {
-              key: obj.Key,
-              relativePath: relativePath,
-              size: obj.Size,
-              lastModified: obj.LastModified,
-              storageClass: obj.StorageClass,
-              etag: obj.ETag?.replace(/"/g, ''),
-              url: isAwsConfigured ? `https://${objectBucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${obj.Key}` : null,
-              tenantId: tenantId, // Add tenant info for multi-tenant aggregation
-              tenantName: tenantMembership.tenant.name
-            };
-          });
+          // Transform objects using utility function with tenant info
+          const transformedObjects = transformS3Objects(objects, tenantId, tenantMembership.tenant);
 
           allObjects = allObjects.concat(transformedObjects);
           totalProcessed += transformedObjects.length;
@@ -862,7 +1242,7 @@ class StorageController {
           tenantIds: tenantMemberships.map(t => t.tenant.tenantId), // Multiple tenants
           tenantCount: tenantMemberships.length,
           prefix: prefix,
-          maxKeys: maxKeysNum,
+          maxKeys: maxTotalKeys,
           awsConfigured: isAwsConfigured,
           aggregated: true // Flag to indicate this is aggregated data
         }
@@ -887,10 +1267,7 @@ class StorageController {
       res.json(responseData);
     } catch (error) {
       logger.error('Storage compatibility list error:', error);
-      res.status(500).json({
-        error: 'Storage list failed',
-        message: 'Failed to list storage objects'
-      });
+      next(error);
     }
   }
 }

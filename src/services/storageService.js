@@ -1,4 +1,4 @@
-const { s3 } = require('../config/aws');
+const { s3, cloudFront } = require('../config/aws');
 const logger = require('../utils/logger');
 
 class StorageService {
@@ -47,10 +47,43 @@ class StorageService {
       };
 
       await s3.deleteObject(params).promise();
-      logger.info(`File deleted from S3: ${key}`);
+      // Reduced logging for individual deletions to prevent log flooding
+      logger.debug(`File deleted from S3: ${key}`);
     } catch (error) {
       logger.error('S3 delete error:', error);
       throw new Error(`Failed to delete from S3: ${error.message}`);
+    }
+  }
+
+  static async batchDeleteFromS3({ bucket, objects }) {
+    try {
+      // AWS S3 batch delete supports up to 1000 objects per request
+      if (objects.length > 1000) {
+        throw new Error('Batch delete supports maximum 1000 objects per request');
+      }
+
+      const params = {
+        Bucket: bucket,
+        Delete: {
+          Objects: objects, // Array of { Key: 'path/to/file' } objects
+          Quiet: true // Don't return deleted object details to reduce response size
+        }
+      };
+
+      const result = await s3.deleteObjects(params).promise();
+      
+      // Log summary instead of individual files
+      logger.info(`Batch deleted ${objects.length} objects from S3 bucket: ${bucket}`);
+      
+      return {
+        deleted: result.Deleted || [],
+        errors: result.Errors || [],
+        deletedCount: objects.length - (result.Errors ? result.Errors.length : 0),
+        errorCount: result.Errors ? result.Errors.length : 0
+      };
+    } catch (error) {
+      logger.error('S3 batch delete error:', error);
+      throw new Error(`Failed to batch delete from S3: ${error.message}`);
     }
   }
 
@@ -266,6 +299,66 @@ class StorageService {
       throw new Error(`Failed to download from S3: ${error.message}`);
     }
   }
+
+  static async createCloudfrontInvalidation({ distributionId, paths }) {
+    try {
+      const params = {
+        DistributionId: distributionId,
+        InvalidationBatch: {
+          Paths: {
+            Quantity: paths.length,
+            Items: paths
+          },
+          CallerReference: `invalidation-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+        }
+      };
+
+      const result = await cloudFront.createInvalidation(params).promise();
+      logger.info(`CloudFront invalidation created: ${result.Invalidation.Id} for distribution: ${distributionId}`);
+      
+      return {
+        invalidationId: result.Invalidation.Id,
+        status: result.Invalidation.Status,
+        createTime: result.Invalidation.CreateTime
+      };
+    } catch (error) {
+      logger.error('CloudFront invalidation error:', error);
+      throw new Error(`Failed to create CloudFront invalidation: ${error.message}`);
+    }
+  }
+
+  static async disableCloudfrontDistribution({ distributionId }) {
+    try {
+      // First, get the current distribution configuration
+      const getParams = {
+        Id: distributionId
+      };
+
+      const distributionConfig = await cloudFront.getDistributionConfig(getParams).promise();
+      
+      // Modify the configuration to disable the distribution
+      const config = distributionConfig.DistributionConfig;
+      config.Enabled = false;
+
+      const updateParams = {
+        Id: distributionId,
+        DistributionConfig: config,
+        IfMatch: distributionConfig.ETag
+      };
+
+      const result = await cloudFront.updateDistribution(updateParams).promise();
+      logger.info(`CloudFront distribution disabled: ${distributionId}`);
+      
+      return {
+        distributionId: distributionId,
+        status: result.Distribution.Status,
+        enabled: result.Distribution.DistributionConfig.Enabled
+      };
+    } catch (error) {
+      logger.error('CloudFront disable error:', error);
+      throw new Error(`Failed to disable CloudFront distribution: ${error.message}`);
+    }
+  }
 }
 
 module.exports = {
@@ -275,9 +368,12 @@ module.exports = {
   getFromS3: StorageService.getFromS3.bind(StorageService),
   downloadFromS3: StorageService.downloadFromS3.bind(StorageService),
   deleteFromS3: StorageService.deleteFromS3.bind(StorageService),
+  batchDeleteFromS3: StorageService.batchDeleteFromS3.bind(StorageService),
   listS3Objects: StorageService.listS3Objects.bind(StorageService),
   getSignedUploadUrl: StorageService.getSignedUploadUrl.bind(StorageService),
   copyS3Object: StorageService.copyS3Object.bind(StorageService),
   syncDirectoryToS3: StorageService.syncDirectoryToS3.bind(StorageService),
-  deleteS3Directory: StorageService.deleteS3Directory.bind(StorageService)
+  deleteS3Directory: StorageService.deleteS3Directory.bind(StorageService),
+  createCloudfrontInvalidation: StorageService.createCloudfrontInvalidation.bind(StorageService),
+  disableCloudfrontDistribution: StorageService.disableCloudfrontDistribution.bind(StorageService)
 };

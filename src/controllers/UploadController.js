@@ -25,12 +25,21 @@ const upload = multer({
     })()
   },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/zip' || 
-        file.mimetype === 'application/x-zip-compressed' || 
-        file.originalname.endsWith('.zip')) {
+    // More secure file validation
+    const allowedMimeTypes = [
+      'application/zip',
+      'application/x-zip-compressed',
+      'application/x-zip',
+      'application/octet-stream'
+    ];
+    
+    const isValidMimeType = allowedMimeTypes.includes(file.mimetype);
+    const isValidExtension = file.originalname?.toLowerCase().endsWith('.zip');
+    
+    if (isValidMimeType && isValidExtension) {
       cb(null, true);
     } else {
-      cb(new Error('Only ZIP files are allowed'), false);
+      cb(new Error('Only ZIP files are allowed. Please upload a valid ZIP file.'), false);
     }
   }
 });
@@ -120,7 +129,7 @@ class UploadController {
       });
 
       // Add verification logging
-      console.log('✅ S3 Upload Result:', {
+      logger.info('S3 Upload Result:', {
         location: uploadResult.Location,
         bucket: uploadResult.Bucket,
         key: uploadResult.Key,
@@ -372,51 +381,108 @@ class UploadController {
     try {
       const { userId } = req.user;
 
-      // Import services and utilities for tenant creation
-      const tenantService = require('../services/tenantService');
+      // Validate file upload first
+      if (!req.file) {
+        return res.status(400).json({
+          error: 'No file uploaded',
+          message: 'Please provide a ZIP file'
+        });
+      }
+
+      // Validate file type more strictly
+      const allowedMimeTypes = [
+        'application/zip',
+        'application/x-zip-compressed',
+        'application/x-zip',
+        'application/octet-stream'
+      ];
+      
+      if (!req.file.originalname?.toLowerCase().endsWith('.zip') || 
+          !allowedMimeTypes.includes(req.file.mimetype)) {
+        return res.status(400).json({
+          error: 'Invalid file type',
+          message: 'Only ZIP files are allowed. Please upload a valid ZIP file.',
+          details: `Received: ${req.file.mimetype}, ${req.file.originalname}`
+        });
+      }
+
+      // Validate file size
+      const maxSizeBytes = 100 * 1024 * 1024; // 100MB
+      if (req.file.size > maxSizeBytes) {
+        return res.status(413).json({
+          error: 'File too large',
+          message: 'File size exceeds the maximum limit of 100MB',
+          details: `Received: ${Math.round(req.file.size / 1024 / 1024)}MB`
+        });
+      }
+
+      // Import utilities for tenant creation
       const { generateTenantId, generateTenantDomain } = require('../utils/tenantUtils');
 
       // Generate unique tenant name based on timestamp and file name
       const timestamp = Date.now();
-      const fileName = req.file?.originalname?.replace('.zip', '') || 'website';
+      const fileName = req.file?.originalname?.replace(/\.zip$/i, '') || 'website';
       const sanitizedFileName = fileName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
       const tenantName = `${sanitizedFileName}-${timestamp}`;
 
       logger.info('Creating new tenant for ZIP upload', {
         userId,
         fileName: req.file?.originalname,
-        tenantName
+        tenantName,
+        fileSize: req.file.size
       });
 
-      // Create new tenant automatically using transaction pattern
-      const result = await prisma.$transaction(async (tx) => {
-        // Generate unique tenant ID
-        const tenantId = await generateTenantId(tenantName);
+      // Create new tenant automatically using transaction with retry logic
+      const maxRetries = 3;
+      let attempt = 0;
+      let result;
 
-        // Create tenant and membership
-        const tenant = await tx.tenant.create({
-          data: {
-            name: tenantName,
-            description: `Auto-created for ${req.file?.originalname || 'ZIP upload'}`,
-            tenantId,
-            domain: generateTenantDomain(tenantId),
-            ownerId: userId,
-            status: 'active'
+      while (attempt < maxRetries) {
+        try {
+          result = await prisma.$transaction(async (tx) => {
+            // Generate unique tenant ID with attempt suffix for uniqueness
+            const baseId = await generateTenantId(tenantName);
+            const tenantId = attempt === 0 ? baseId : `${baseId}-${attempt}`;
+
+            // Create tenant
+            const tenant = await tx.tenant.create({
+              data: {
+                name: `${tenantName}${attempt > 0 ? `-${attempt}` : ''}`,
+                description: `Auto-created for ${req.file?.originalname || 'ZIP upload'}`,
+                tenantId,
+                domain: generateTenantDomain(tenantId),
+                ownerId: userId,
+                status: 'active'
+              }
+            });
+
+            // Create membership
+            const membership = await tx.tenantMember.create({
+              data: {
+                tenantId: tenant.tenantId,
+                userId: userId,
+                role: 'owner',
+                status: 'active',
+                joinedAt: new Date()
+              }
+            });
+
+            return { tenant, membership };
+          });
+          break; // Success, exit retry loop
+        } catch (error) {
+          attempt++;
+          if (error.code === 'P2002' && attempt < maxRetries) {
+            logger.warn(`Tenant creation conflict on attempt ${attempt}, retrying...`, {
+              userId,
+              tenantName,
+              attempt
+            });
+            continue;
           }
-        });
-
-        const membership = await tx.tenantMember.create({
-          data: {
-            tenantId: tenant.tenantId,
-            userId: userId,
-            role: 'owner',
-            status: 'active',
-            joinedAt: new Date()
-          }
-        });
-
-        return { tenant, membership };
-      });
+          throw error; // Re-throw if not a uniqueness conflict or max retries reached
+        }
+      }
 
       // Set tenant context for the upload
       req.params.tenantId = result.tenant.tenantId;
@@ -433,11 +499,25 @@ class UploadController {
       return await UploadController.uploadFile(req, res, next);
     } catch (error) {
       logger.error('Auto-tenant upload error:', error);
-      res.status(500).json({
-        error: 'Upload failed',
-        message: 'Failed to create tenant and upload build file',
-        details: error.message
-      });
+      
+      // More specific error handling
+      if (error.code === 'P2002') {
+        return res.status(409).json({
+          error: 'Tenant creation conflict',
+          message: 'A tenant with this identifier already exists. Please try again.',
+          details: 'Database uniqueness constraint violation'
+        });
+      }
+
+      if (error.message?.includes('file')) {
+        return res.status(400).json({
+          error: 'File upload error',
+          message: error.message,
+          details: 'Failed to process uploaded file'
+        });
+      }
+
+      next(error);
     }
   }
 }

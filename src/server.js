@@ -471,11 +471,21 @@ if (process.env.NODE_ENV === 'development') {
                 const data = await response.text();
                 console.log('Response data:', data);
                 
-                document.getElementById('result').innerHTML = \`
-                    <h2>Registration Response</h2>
-                    <p>Status: \${response.status}</p>
-                    <p>Data: \${data}</p>
-                \`;
+                // ✅ SECURITY FIX: Use textContent instead of innerHTML to prevent XSS
+                const resultDiv = document.getElementById('result');
+                resultDiv.innerHTML = ''; // Clear existing content safely
+                
+                const h2 = document.createElement('h2');
+                h2.textContent = 'Registration Response';
+                resultDiv.appendChild(h2);
+                
+                const statusP = document.createElement('p');
+                statusP.textContent = \`Status: \${response.status}\`;
+                resultDiv.appendChild(statusP);
+                
+                const dataP = document.createElement('p');
+                dataP.textContent = \`Data: \${data}\`;
+                resultDiv.appendChild(dataP);
                 
                 if (response.ok) {
                     // Try to get OTP from debug endpoint
@@ -484,10 +494,14 @@ if (process.env.NODE_ENV === 'development') {
                         const otpData = await otpResponse.json();
                         console.log('OTP Debug:', otpData);
                         
-                        document.getElementById('result').innerHTML += \`
-                            <h3>OTP Debug Info</h3>
-                            <pre>\${JSON.stringify(otpData, null, 2)}</pre>
-                        \`;
+                        // ✅ SECURITY FIX: Use textContent instead of innerHTML
+                        const h3 = document.createElement('h3');
+                        h3.textContent = 'OTP Debug Info';
+                        resultDiv.appendChild(h3);
+                        
+                        const pre = document.createElement('pre');
+                        pre.textContent = JSON.stringify(otpData, null, 2);
+                        resultDiv.appendChild(pre);
                     } catch (e) {
                         console.log('No OTP debug endpoint');
                     }
@@ -495,10 +509,18 @@ if (process.env.NODE_ENV === 'development') {
                 
             } catch (error) {
                 console.error('Error:', error);
-                document.getElementById('result').innerHTML = \`
-                    <h2>Error</h2>
-                    <p>\${error.message}</p>
-                \`;
+                
+                // ✅ SECURITY FIX: Use textContent instead of innerHTML
+                const resultDiv = document.getElementById('result');
+                resultDiv.innerHTML = ''; // Clear existing content safely
+                
+                const h2 = document.createElement('h2');
+                h2.textContent = 'Error';
+                resultDiv.appendChild(h2);
+                
+                const p = document.createElement('p');
+                p.textContent = error.message;
+                resultDiv.appendChild(p);
             }
         }
         
