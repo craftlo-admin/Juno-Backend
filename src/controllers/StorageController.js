@@ -147,6 +147,148 @@ class StorageController {
   }
 
   /**
+   * List S3 objects using tenant from authentication context
+   */
+  static async listObjectsGeneral(req, res, next) {
+    try {
+      const { userId } = req.user;
+      const { prefix = '', maxKeys = 100, startAfter = '', tenantId: queryTenantId = '' } = req.query;
+
+      let tenantId = queryTenantId;
+
+      // If no tenant specified in query, get user's first active tenant
+      if (!tenantId) {
+        const membership = await prisma.tenantMember.findFirst({
+          where: {
+            userId: userId,
+            status: 'active'
+          },
+          include: {
+            tenant: true
+          },
+          orderBy: {
+            createdAt: 'desc'
+          }
+        });
+
+        if (!membership) {
+          return res.status(400).json({
+            error: 'Bad Request',
+            message: 'No active tenant found. Please specify tenantId in query parameters or join a tenant first.'
+          });
+        }
+
+        tenantId = membership.tenant.tenantId;
+      } else {
+        // Verify user has access to the specified tenant
+        const membership = await prisma.tenantMember.findFirst({
+          where: {
+            userId: userId,
+            status: 'active',
+            tenant: {
+              tenantId: tenantId
+            }
+          }
+        });
+
+        if (!membership) {
+          return res.status(403).json({
+            error: 'Forbidden',
+            message: 'You do not have access to this tenant.'
+          });
+        }
+      }
+
+      logger.info('📁 Listing storage objects (general)', {
+        userId,
+        tenantId,
+        prefix,
+        maxKeys,
+        startAfter
+      });
+
+      const s3Prefix = `tenants/${tenantId}/${prefix}`;
+
+      // Use optimized bucket determination
+      const bucket = getBucketForPrefix(prefix);
+
+      logger.info('📦 Storage service call (general)', {
+        bucket,
+        s3Prefix,
+        awsConfigured: isAwsConfigured
+      });
+
+      const objects = await storageService.listS3Objects({
+        bucket: bucket,
+        prefix: s3Prefix,
+        maxKeys: Math.max(1, Math.min(parseInt(maxKeys) || 100, 1000)), // Validate and limit
+        startAfter: startAfter
+      });
+
+      logger.info('📋 Storage service response (general)', {
+        objectsCount: objects?.length || 0,
+        objectsType: typeof objects,
+        firstObject: objects?.[0] || null
+      });
+
+      // Transform objects using utility function
+      const transformedObjects = transformS3Objects(objects, tenantId);
+
+      // Group by type (builds, deployments, etc.)
+      const groupedObjects = {
+        builds: transformedObjects.filter(obj => obj.relativePath.startsWith('builds/')),
+        deployments: transformedObjects.filter(obj => obj.relativePath.startsWith('deployments/')),
+        assets: transformedObjects.filter(obj => obj.relativePath.startsWith('assets/')),
+        other: transformedObjects.filter(obj => 
+          !obj.relativePath.startsWith('builds/') && 
+          !obj.relativePath.startsWith('deployments/') && 
+          !obj.relativePath.startsWith('assets/')
+        )
+      };
+
+      // Calculate total size
+      const totalSize = transformedObjects.reduce((sum, obj) => sum + obj.size, 0);
+
+      const responseData = {
+        success: true,
+        data: {
+          objects: transformedObjects,
+          grouped: groupedObjects,
+          stats: {
+            totalFiles: transformedObjects.length,
+            totalSize: totalSize,
+            totalSizeFormatted: formatBytes(totalSize),
+            builds: groupedObjects.builds.length,
+            deployments: groupedObjects.deployments.length,
+            assets: groupedObjects.assets.length,
+            other: groupedObjects.other.length
+          }
+        },
+        meta: {
+          userId: userId,
+          tenantId: tenantId,
+          prefix: s3Prefix,
+          maxKeys: parseInt(maxKeys),
+          awsConfigured: isAwsConfigured
+        }
+      };
+
+      logger.info('📤 Sending storage response (general)', {
+        totalFiles: transformedObjects.length,
+        builds: groupedObjects.builds.length,
+        deployments: groupedObjects.deployments.length,
+        hasData: transformedObjects.length > 0
+      });
+
+      res.json(responseData);
+
+    } catch (error) {
+      logger.error('List S3 objects error (general):', error);
+      next(error);
+    }
+  }
+
+  /**
    * Get details of a specific S3 object
    */
   static async getObjectDetails(req, res, next) {
@@ -319,23 +461,13 @@ class StorageController {
       }
 
       // 2. ✅ ENHANCED: Handle build-related deletions
-      logger.info(`🔍 DEBUG: About to check build path conditions for: ${objectPath}`);
-      logger.info(`🔍 DEBUG: includes('/builds/'): ${objectPath.includes('/builds/')}`);
-      logger.info(`🔍 DEBUG: includes('builds/'): ${objectPath.includes('builds/')}`);
-      logger.info(`🔍 DEBUG: Combined condition: ${objectPath.includes('/builds/') || objectPath.includes('builds/')}`);
-      
       if (objectPath.includes('/builds/') || objectPath.includes('builds/')) {
-        logger.info(`🎯 DEBUG: ENTERED BUILD DELETION LOGIC!`);
         const buildIdMatch = objectPath.match(/builds\/([^\/]+)/);
-        logger.info(`🔍 Build ID regex match result:`, buildIdMatch);
         
         if (buildIdMatch) {
           const buildId = buildIdMatch[1];
           
           logger.info(`🔍 Processing build deletion for buildId: ${buildId}`);
-          logger.info(`🔍 Extracted tenantId: ${tenantId}`);
-          logger.info(`🔍 Full object path: ${objectPath}`);
-          logger.info(`🔍 Full S3 key: ${s3Key}`);
           
           try {
             // Find the build record (might not exist)

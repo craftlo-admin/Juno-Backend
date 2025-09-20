@@ -4,18 +4,17 @@ const { StorageController } = require('../controllers/StorageController');
 const { authenticateToken } = require('../middleware/auth');
 const authorizeTenantAccess = require('../middleware/tenantAuth');
 
+// General list endpoint (uses tenant from auth context)
+router.get('/list', 
+  authenticateToken, 
+  StorageController.listObjectsGeneral
+);
+
 // List S3 objects for tenant (with optional prefix filtering)
 router.get('/list/:tenantId', 
   authenticateToken, 
   authorizeTenantAccess(['owner', 'admin', 'member']),
   StorageController.listObjects
-);
-
-// TEMPORARY: Backward compatibility for old frontend calls
-// TODO: Remove this route once frontend is updated to use tenant-specific routes
-router.get('/list', 
-  authenticateToken,
-  StorageController.listObjectsCompatibility
 );
 
 // Get S3 object details

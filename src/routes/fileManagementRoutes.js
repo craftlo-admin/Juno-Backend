@@ -7,7 +7,7 @@ const rateLimit = require('express-rate-limit');
 
 const { authenticateToken } = require('../middleware/auth');
 const logger = require('../utils/logger');
-const { uploadToS3, deleteFromS3 } = require('../services/awsService');
+const storageService = require('../services/storageService');
 const { prisma } = require('../lib/prisma');
 
 /**
@@ -198,7 +198,13 @@ router.post('/single',
       });
 
       // Upload to S3
-      const uploadResult = await uploadToS3(req.file.buffer, fileName, req.file.mimetype);
+      const bucket = process.env.AWS_S3_BUCKET_NAME || process.env.S3_BUCKET_NAME;
+      const uploadResult = await storageService.uploadToS3({
+        key: fileName,
+        body: req.file.buffer,
+        contentType: req.file.mimetype,
+        bucket: bucket
+      });
 
       // Save file record to database
       uploadedFile = await prisma.uploadedFile.create({
@@ -270,7 +276,10 @@ router.post('/single',
       // Cleanup S3 if upload record creation failed
       if (uploadedFile && uploadedFile.s3Key) {
         try {
-          await deleteFromS3(uploadedFile.s3Key);
+          await storageService.deleteFromS3({
+            key: uploadedFile.s3Key,
+            bucket: process.env.AWS_S3_BUCKET_NAME || process.env.S3_BUCKET_NAME
+          });
           logger.info('Cleaned up S3 file after database error:', {
             s3Key: uploadedFile.s3Key
           });
@@ -381,7 +390,13 @@ router.post('/multiple',
             const fileName = `${req.user.id}/${timestamp}-${randomString}${fileExtension}`;
 
             // Upload to S3
-            const uploadResult = await uploadToS3(file.buffer, fileName, file.mimetype);
+            const bucket = process.env.AWS_S3_BUCKET_NAME || process.env.S3_BUCKET_NAME;
+            const uploadResult = await storageService.uploadToS3({
+              key: fileName,
+              body: file.buffer,
+              contentType: file.mimetype,
+              bucket: bucket
+            });
 
             // Save file record to database
             const uploadedFile = await prisma.uploadedFile.create({
@@ -629,7 +644,10 @@ router.delete('/files/:id',
 
       // Delete from S3
       try {
-        await deleteFromS3(file.s3Key);
+        await storageService.deleteFromS3({
+          key: file.s3Key,
+          bucket: process.env.AWS_S3_BUCKET_NAME || process.env.S3_BUCKET_NAME
+        });
         logger.info('File deleted from S3:', {
           s3Key: file.s3Key,
           fileId: file.id

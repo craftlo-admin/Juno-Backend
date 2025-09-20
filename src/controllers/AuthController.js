@@ -460,46 +460,6 @@ class AuthController {
   }
 
   /**
-   * Get current user profile
-   */
-  static async getProfile(req, res, next) {
-    try {
-      const { user } = req; // From auth middleware
-
-      const userProfile = await executeWithRetry(
-        () => prisma.user.findUnique({
-          where: { id: user.id },
-          select: {
-            id: true,
-            email: true,
-            firstName: true,
-            lastName: true,
-            role: true,
-            emailVerified: true,
-            createdAt: true,
-            lastLoginAt: true
-          }
-        }),
-        3
-      );
-
-      if (!userProfile) {
-        return res.status(404).json({
-          error: 'User not found'
-        });
-      }
-
-      res.json({
-        success: true,
-        data: { user: userProfile }
-      });
-    } catch (error) {
-      logger.error('❌ Get profile failed:', error);
-      next(error);
-    }
-  }
-
-  /**
    * Get current authenticated user information
    */
   static async getCurrentUser(req, res, next) {

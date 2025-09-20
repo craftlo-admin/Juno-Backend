@@ -25,8 +25,10 @@ function handler(event) {
     // Extract tenant ID from hostname
     var tenantId = null;
     
-    // Configuration - this should match your environment
-    var customDomainBase = 'junotech.in'; // TODO: Make this configurable
+    // Configuration - domain base is passed as environment variable
+    var customDomainBase = event.request.headers['x-domain-base'] ? 
+        event.request.headers['x-domain-base'][0].value : 
+        'builderfun.com'; // Fallback domain
     
     // Handle custom domains: tenant123.junotech.in
     if (host.endsWith('.' + customDomainBase)) {
