@@ -15,9 +15,6 @@ const options = {
         - User authentication and tenant management
         - File upload and build processing
         - Real-time deployment tracking
-        - WebSocket integration for live updates
-        - Analytics and monitoring
-        - Webhook integrations
         - Custom domain management
       `,
       contact: {
@@ -171,43 +168,6 @@ const options = {
               description: 'Deployment URL'
             },
             deployed_at: {
-              type: 'string',
-              format: 'date-time'
-            }
-          }
-        },
-        Webhook: {
-          type: 'object',
-          properties: {
-            id: {
-              type: 'string',
-              description: 'Webhook identifier'
-            },
-            url: {
-              type: 'string',
-              format: 'uri',
-              description: 'Webhook endpoint URL'
-            },
-            events: {
-              type: 'array',
-              items: {
-                type: 'string',
-                enum: [
-                  'build.started',
-                  'build.completed', 
-                  'build.failed',
-                  'deployment.started',
-                  'deployment.completed',
-                  'deployment.failed'
-                ]
-              },
-              description: 'Events that trigger this webhook'
-            },
-            enabled: {
-              type: 'boolean',
-              description: 'Whether the webhook is active'
-            },
-            created_at: {
               type: 'string',
               format: 'date-time'
             }
@@ -369,18 +329,6 @@ const options = {
       {
         name: 'Domains',
         description: 'Custom domain management'
-      },
-      {
-        name: 'Webhooks',
-        description: 'Webhook configuration and management'
-      },
-      {
-        name: 'Analytics',
-        description: 'System analytics and monitoring'
-      },
-      {
-        name: 'Real-time',
-        description: 'WebSocket and real-time features'
       },
       {
         name: 'System',

@@ -87,17 +87,7 @@ router.get('/', (req, res) => {
     },
     rate_limiting: {
       general: '100 requests per 15 minutes per IP',
-      authenticated: '1000 requests per hour per user',
-      webhooks: '50 requests per 15 minutes per IP'
-    },
-    websocket_info: {
-      url: `${req.protocol === 'https' ? 'wss' : 'ws'}://${req.get('host')}`,
-      authentication: 'Include JWT token in handshake.auth.token',
-      events: [
-        'build:update - Real-time build status updates',
-        'deployment:update - Real-time deployment updates',
-        'notification - User notifications'
-      ]
+      authenticated: '1000 requests per hour per user'
     }
   };
 
@@ -266,12 +256,10 @@ router.get('/changelog', (req, res) => {
         version: 'v2.0.0',
         release_date: '2025-09-11',
         changes: [
-          'Added WebSocket support for real-time updates',
-          'Introduced webhook system for external integrations',
-          'Enhanced analytics and monitoring capabilities',
-          'API versioning system implementation',
+          'Enhanced API versioning system implementation',
           'Improved error handling and response formats',
-          'Added comprehensive OpenAPI documentation'
+          'Added comprehensive OpenAPI documentation',
+          'Streamlined core functionality and removed unused features'
         ],
         breaking_changes: [
           'Response format changed to include meta information',
@@ -351,11 +339,10 @@ router.get('/migration/v1-to-v2', (req, res) => {
       }
     },
     new_features: [
-      'Real-time WebSocket connections',
-      'Webhook management endpoints',
-      'Enhanced analytics and monitoring',
-      'Bulk operations support',
-      'Advanced error details'
+      'Enhanced API versioning and documentation',
+      'Streamlined core functionality',
+      'Improved error handling and response formats',
+      'Optimized build and deployment processes'
     ],
     deprecated_features: [
       'Some v1-specific response formats (will be removed in v3)'
@@ -406,27 +393,6 @@ const config = {
     'API-Version': 'v2'
   }
 };
-      `,
-      websocket: `
-// WebSocket connection example
-const io = require('socket.io-client');
-
-const socket = io('ws://localhost:3000', {
-  auth: {
-    token: 'your-jwt-token'
-  }
-});
-
-socket.on('connected', (data) => {
-  console.log('Connected:', data);
-  
-  // Subscribe to build updates
-  socket.emit('subscribe:builds');
-});
-
-socket.on('build:update', (data) => {
-  console.log('Build update:', data);
-});
       `,
       file_upload: `
 // File upload example

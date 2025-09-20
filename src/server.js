@@ -141,7 +141,8 @@ app.use((req, res, next) => {
 
 // Import and mount route handlers with comprehensive error handling
 let authRoutes, tenantRoutes, uploadRoutes, projectRoutes;
-let analyticsRoutes, webhooksRoutes, realtimeRoutes, docsRoutes;
+// Load routes - declare early to handle graceful degradation
+let docsRoutes;
 
 // Core routes (critical)
 // Auth routes
@@ -248,51 +249,6 @@ try {
 }
 
 // Advanced feature routes (non-critical, graceful degradation)
-// Analytics routes
-try {
-  analyticsRoutes = require('./routes/analytics');
-  logger.info('✅ Analytics routes loaded successfully');
-} catch (analyticsError) {
-  logger.warn('⚠️ Analytics routes failed to load (non-critical):', analyticsError.message);
-  analyticsRoutes = express.Router();
-  analyticsRoutes.use('*', (req, res) => {
-    res.status(503).json({
-      error: 'Analytics Service Unavailable',
-      message: 'Analytics features temporarily unavailable.'
-    });
-  });
-}
-
-// Webhooks routes
-try {
-  webhooksRoutes = require('./routes/webhooks');
-  logger.info('✅ Webhooks routes loaded successfully');
-} catch (webhooksError) {
-  logger.warn('⚠️ Webhooks routes failed to load (non-critical):', webhooksError.message);
-  webhooksRoutes = express.Router();
-  webhooksRoutes.use('*', (req, res) => {
-    res.status(503).json({
-      error: 'Webhooks Service Unavailable',
-      message: 'Webhook features temporarily unavailable.'
-    });
-  });
-}
-
-// Real-time/WebSocket routes
-try {
-  realtimeRoutes = require('./routes/realtime');
-  logger.info('✅ Real-time routes loaded successfully');
-} catch (realtimeError) {
-  logger.warn('⚠️ Real-time routes failed to load (non-critical):', realtimeError.message);
-  realtimeRoutes = express.Router();
-  realtimeRoutes.use('*', (req, res) => {
-    res.status(503).json({
-      error: 'Real-time Service Unavailable',
-      message: 'Real-time features temporarily unavailable.'
-    });
-  });
-}
-
 // Documentation routes
 try {
   docsRoutes = require('./routes/docs');
@@ -564,9 +520,6 @@ app.use('/api/storage', storageRoutes); // S3 storage management and listing
 app.use('/api/projects', projectRoutes);
 
 // API Routes - Advanced features (with graceful degradation)
-app.use('/api/analytics', analyticsRoutes);
-app.use('/api/webhooks', webhooksRoutes);
-app.use('/api/realtime', realtimeRoutes);
 app.use('/api/docs', docsRoutes);
 
 // API Routes - Development only
@@ -598,10 +551,6 @@ app.use('*', (req, res) => {
       'GET /api/builds/:tenantId/list',
       'POST /api/projects',
       'GET /api/projects',
-      '--- Advanced Features ---',
-      'GET /api/analytics/dashboard',
-      'POST /api/webhooks',
-      'GET /api/realtime/stats',
       'GET /api/docs/ui (Interactive API docs)',
       'GET /api/docs/openapi.json'
     ],
@@ -660,8 +609,8 @@ async function startServer() {
       console.log('\n📊 Service Status:');
       console.log(`🗃️ Database: ${dbStatus === 'connected' ? '✅ Connected' : '❌ ' + dbStatus}`);
       console.log(`📧 Email: ${emailStatus === 'configured' ? '✅ Configured' : '⚠️ Mock Mode'}`);
-      console.log(`📋 Routes: ✅ Loaded (auth, tenants, upload, projects, analytics, webhooks, realtime, docs)`);
-      console.log(`🎯 Features: ✅ Advanced routes mounted with graceful degradation`);
+      console.log(`📋 Routes: ✅ Loaded (auth, tenants, upload, projects, docs)`);
+      console.log(`🎯 Features: ✅ Core routes mounted with graceful degradation`);
       
       if (dbStatus !== 'connected' || emailStatus === 'error') {
         console.log('\n🔧 Issues Detected:');

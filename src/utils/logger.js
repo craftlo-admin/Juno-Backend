@@ -42,13 +42,6 @@ const logger = winston.createLogger({
       maxsize: 5242880, // 5MB
       maxFiles: 5
     }),
-    // Create a separate real-time development log
-    new winston.transports.File({ 
-      filename: 'logs/dev-realtime.log',
-      format: consoleFormat, // Use readable format for real-time monitoring
-      maxsize: 10485760, // 10MB
-      maxFiles: 3
-    }),
     // Build-specific logs
     new winston.transports.File({ 
       filename: 'logs/build-process.log',

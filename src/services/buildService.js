@@ -123,18 +123,6 @@ buildQueue.process('process-build', async (job) => {
       }
     });
 
-    // Emit progress update via WebSocket (optional)
-    try {
-      const websocketService = require('./websocketService');
-      websocketService.emitToTenant(tenantId, 'build:started', {
-        buildId,
-        status: 'building',
-        message: 'Build process started'
-      });
-    } catch (error) {
-      logger.warn('WebSocket service not available:', error.message);
-    }
-
     // Process the build (implement your build logic here)
     const buildResult = await processBuild({
       buildId,
@@ -166,19 +154,6 @@ buildQueue.process('process-build', async (job) => {
         }
       });
 
-      // Emit success via WebSocket (optional)
-      try {
-        const websocketService = require('./websocketService');
-        websocketService.emitToTenant(tenantId, 'build:completed', {
-          buildId,
-          status: 'success',
-          deploymentId: deployment.id,
-          url: buildResult.deploymentUrl
-        });
-      } catch (error) {
-        logger.warn('WebSocket service not available for success notification:', error.message);
-      }
-
       logger.info('Build completed successfully', { buildId, deploymentId: deployment.id });
 
       // 🌐 Log the live website URL
@@ -204,18 +179,6 @@ buildQueue.process('process-build', async (job) => {
           errorMessage: buildResult.error
         }
       });
-
-      // Emit failure via WebSocket (optional)
-      try {
-        const websocketService = require('./websocketService');
-        websocketService.emitToTenant(tenantId, 'build:failed', {
-          buildId,
-          status: 'failed',
-          error: buildResult.error
-        });
-      } catch (error) {
-        logger.warn('WebSocket service not available for failure notification:', error.message);
-      }
 
       logger.error('Build failed', { buildId, error: buildResult.error });
     }
@@ -261,20 +224,6 @@ buildQueue.process('process-build', async (job) => {
           buildId, 
           error: deploymentUpdateError.message 
         });
-      }
-    }
-
-    // Emit failure via WebSocket (if we have tenantId)
-    if (tenantId) {
-      try {
-        const websocketService = require('./websocketService');
-        websocketService.emitToTenant(tenantId, 'build:failed', {
-          buildId,
-          status: 'failed',
-          error: error.message
-        });
-      } catch (wsError) {
-        logger.warn('WebSocket service not available for error notification:', wsError.message);
       }
     }
 

@@ -23,7 +23,7 @@
     "format": "prettier --write \"src/**/*.{js,json,md}\"",
     "prepare": "husky install",
     "health": "node -e \"const http = require('http'); http.get('http://localhost:8000/health', res => { let data = ''; res.on('data', chunk => data += chunk); res.on('end', () => console.log(JSON.parse(data))); });\"",
-    "logs": "Get-Content logs/dev-realtime.log -Wait -Tail 20",
+    "logs": "Get-Content logs/combined.log -Wait -Tail 20",
     "logs:all": "Get-Content logs/combined.log -Wait -Tail 30",
     "logs:build": "Get-Content logs/build-process.log -Wait -Tail 20",
     "logs:error": "Get-Content logs/error.log -Wait -Tail 10",

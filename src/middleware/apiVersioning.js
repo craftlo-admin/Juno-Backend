@@ -202,10 +202,7 @@ function hasFeature(feature, version = DEFAULT_VERSION) {
       'file_upload', 
       'basic_deployment',
       'simple_metrics',
-      'realtime_updates',
-      'advanced_metrics',
       'bulk_operations',
-      'webhooks',
       'rate_limiting_per_endpoint',
       'enhanced_error_details'
     ]
