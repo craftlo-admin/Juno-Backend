@@ -7,6 +7,25 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// Enums for deployment strategy support
+enum DeploymentStrategy {
+  individual
+  shared
+}
+
+enum SubscriptionTier {
+  standard
+  premium
+  enterprise
+}
+
+enum TrafficTier {
+  low
+  normal
+  high
+  enterprise
+}
+
 model User {
   id                     String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email                  String         @unique
@@ -31,44 +50,56 @@ model User {
 }
 
 model Tenant {
-  id                        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId                  String       @unique @map("tenant_id")
-  ownerId                   String       @map("owner_id") @db.Uuid
+  id                        String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                  String              @unique @map("tenant_id")
+  ownerId                   String              @map("owner_id") @db.Uuid
   name                      String
-  status                    String       @default("pending")
+  status                    String              @default("pending")
   domain                    String
-  customDomain              String?      @map("custom_domain")
-  currentVersion            String?      @map("current_version")
-  buildArtifactPath         String?      @map("build_artifact_path")
+  customDomain              String?             @map("custom_domain")
+  currentVersion            String?             @map("current_version")
+  buildArtifactPath         String?             @map("build_artifact_path")
   description               String?
-  config                    Json         @default("{}")
-  buildSettings             Json         @default("{}") @map("build_settings")
+  config                    Json                @default("{}")
+  buildSettings             Json                @default("{}") @map("build_settings")
   
   // CloudFront Distribution fields for tenant-specific distributions
-  cloudfrontDistributionId  String?      @map("cloudfront_distribution_id")
-  cloudfrontDomain          String?      @map("cloudfront_domain")
-  cloudfrontStatus          String?      @map("cloudfront_status")
-  cloudfrontUniqueId        String?      @map("cloudfront_unique_id")
-  cloudfrontCreatedAt       DateTime?    @map("cloudfront_created_at")
+  cloudfrontDistributionId  String?             @map("cloudfront_distribution_id")
+  cloudfrontDomain          String?             @map("cloudfront_domain")
+  cloudfrontStatus          String?             @map("cloudfront_status")
+  cloudfrontUniqueId        String?             @map("cloudfront_unique_id")
+  cloudfrontCreatedAt       DateTime?           @map("cloudfront_created_at")
   
   // Primary domain used for deployments (custom domain or CloudFront)
-  primaryDomain             String?      @map("primary_domain")
+  primaryDomain             String?             @map("primary_domain")
   
-  lastDeployedAt            DateTime?    @map("last_deployed_at")
-  createdAt                 DateTime     @default(now()) @map("created_at")
-  updatedAt                 DateTime     @updatedAt @map("updated_at")
+  // Deployment Strategy Configuration (NEW)
+  deploymentStrategy        DeploymentStrategy? @map("deployment_strategy")
+  subscriptionTier          SubscriptionTier    @default(standard) @map("subscription_tier")
+  planType                  SubscriptionTier    @default(standard) @map("plan_type")
+  trafficTier               TrafficTier         @default(normal) @map("traffic_tier")
+  monthlyPageViews          Int                 @default(0) @map("monthly_page_views")
+  complianceRequirements    String[]            @map("compliance_requirements")
+  
+  lastDeployedAt            DateTime?           @map("last_deployed_at")
+  createdAt                 DateTime            @default(now()) @map("created_at")
+  updatedAt                 DateTime            @updatedAt @map("updated_at")
   auditLogs                 AuditLog[]
   builds                    Build[]
   deployments               Deployment[]
   projects                  Project[]
   members                   TenantMember[]
-  owner                     User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  owner                     User                @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
   @@index([ownerId])
   @@index([status])
   @@index([domain])
   @@index([cloudfrontDistributionId])
+  @@index([deploymentStrategy])
+  @@index([subscriptionTier])
+  @@index([trafficTier])
+  @@index([subscriptionTier, deploymentStrategy, trafficTier], name: "strategy_selection_idx")
   @@map("tenants")
 }
 

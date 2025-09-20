@@ -92,7 +92,7 @@ class StorageService {
     }
   }
 
-  static async copyS3Object({ sourceBucket, sourceKey, destBucket, destKey }) {
+  static async copyS3Object({ sourceBucket, sourceKey, destBucket, destKey, suppressLogging = false }) {
     try {
       const params = {
         Bucket: destBucket,
@@ -101,7 +101,12 @@ class StorageService {
       };
 
       const result = await s3.copyObject(params).promise();
-      logger.info(`File copied in S3: ${sourceKey} -> ${destKey}`);
+      
+      // Only log individual file copies if not suppressed
+      if (!suppressLogging) {
+        logger.info(`File copied in S3: ${sourceKey} -> ${destKey}`);
+      }
+      
       return result;
     } catch (error) {
       logger.error('S3 copy error:', error);
