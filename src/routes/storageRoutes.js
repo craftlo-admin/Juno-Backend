@@ -11,10 +11,11 @@ router.get('/list/:tenantId',
   StorageController.listObjects
 );
 
-// List all tenant's S3 objects (for user's first tenant)
+// TEMPORARY: Backward compatibility for old frontend calls
+// TODO: Remove this route once frontend is updated to use tenant-specific routes
 router.get('/list', 
   authenticateToken,
-  StorageController.listObjectsForUser
+  StorageController.listObjectsCompatibility
 );
 
 // Get S3 object details

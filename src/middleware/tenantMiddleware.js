@@ -3,7 +3,7 @@ const prisma = require('../lib/prisma');
 
 /**
  * Multi-tenant isolation middleware
- * Ensures tenant data isolation following project architecture
+ * Ensures tenant data isolation and checks user access to tenant
  */
 const tenantMiddleware = async (req, res, next) => {
   try {
@@ -16,12 +16,34 @@ const tenantMiddleware = async (req, res, next) => {
       });
     }
     
-    // Verify tenant exists and user has access
+    // Verify tenant exists and user has access (either as owner or member)
     const tenant = await prisma.tenant.findFirst({
       where: {
-        id: tenantId,
-        userId: req.user.id,
-        isActive: true
+        tenantId: tenantId,
+        OR: [
+          // User is the owner
+          { ownerId: req.user.userId },
+          // User is a member
+          { 
+            members: {
+              some: {
+                userId: req.user.userId,
+                status: 'active'
+              }
+            }
+          }
+        ]
+      },
+      include: {
+        members: {
+          where: {
+            userId: req.user.userId
+          },
+          select: {
+            role: true,
+            status: true
+          }
+        }
       }
     });
     
@@ -32,7 +54,20 @@ const tenantMiddleware = async (req, res, next) => {
       });
     }
     
-    req.tenant = tenant;
+    // Determine user's role in this tenant
+    const userRole = tenant.ownerId === req.user.userId ? 'owner' : tenant.members[0]?.role || 'member';
+    
+    req.tenant = {
+      ...tenant,
+      userRole: userRole
+    };
+    
+    logger.debug('Tenant access granted', {
+      userId: req.user.userId,
+      tenantId: tenant.tenantId,
+      userRole: userRole
+    });
+    
     next();
   } catch (error) {
     logger.error('Tenant middleware error:', error);

@@ -4,7 +4,6 @@ const logger = require('../utils/logger');
 const { generateToken } = require('../utils/jwt');
 const { generateOTP } = require('../utils/otp');
 const { sendOTPEmail } = require('../services/emailService');
-const { createTenant } = require('../services/tenantService');
 
 /**
  * Multi-tenant Website Builder - Auth Controller (Clean Refactored)
@@ -161,7 +160,7 @@ class AuthController {
           });
         }
 
-        // Create user and tenant in transaction
+        // Create user in transaction
         const result = await prisma.$transaction(async (tx) => {
           const user = await tx.user.create({
             data: {
@@ -183,45 +182,36 @@ class AuthController {
             userEmail: user?.email
           });
 
-          // Ensure user has required fields before creating tenant
+          // Ensure user has required fields
           if (!user || !user.id || !user.email) {
             throw new Error(`User creation failed: missing required fields. User: ${JSON.stringify(user)}`);
           }
 
-          const tenant = await createTenant(tx, user);
-          return { user, tenant };
+          return { user };
         });
 
         // Clean up OTP store
         otpStore.delete(`registration:${email}`);
 
-        // Generate JWT token
+        // Generate JWT token (without tenantId - user can create tenants later)
         const token = generateToken({
           userId: result.user.id,
-          email: result.user.email,
-          tenantId: result.tenant.tenantId
+          email: result.user.email
         });
 
         logger.info('✅ Registration completed', { 
-          userId: result.user.id, 
-          tenantId: result.tenant.tenantId 
+          userId: result.user.id
         });
 
         res.status(201).json({
           success: true,
-          message: 'Registration completed successfully',
+          message: 'Registration completed successfully. You can now create tenants to deploy your websites.',
           data: {
             user: {
               id: result.user.id,
               email: result.user.email,
               firstName: result.user.firstName,
               lastName: result.user.lastName
-            },
-            tenant: {
-              id: result.tenant.id,
-              tenantId: result.tenant.tenantId,
-              name: result.tenant.name,
-              domain: result.tenant.domain
             },
             token
           }
@@ -298,11 +288,10 @@ class AuthController {
         3
       );
 
-      // Generate JWT token
+      // Generate JWT token (without specific tenantId - user can select tenant)
       const token = generateToken({
         userId: user.id,
-        email: user.email,
-        tenantId: user.tenants[0]?.tenantId || null
+        email: user.email
       });
 
       logger.info('✅ Login successful', { userId: user.id });

@@ -13,6 +13,13 @@ class StorageController {
       const { tenantId } = req.params;
       const { prefix = '', maxKeys = 100, startAfter = '' } = req.query;
 
+      logger.info('📁 Listing storage objects', {
+        tenantId,
+        prefix,
+        maxKeys,
+        startAfter
+      });
+
       const s3Prefix = `tenants/${tenantId}/${prefix}`;
 
       // Determine which bucket to use based on prefix
@@ -20,11 +27,23 @@ class StorageController {
         ? process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME
         : process.env.AWS_S3_BUCKET_STATIC || process.env.AWS_S3_BUCKET_NAME;
 
+      logger.info('📦 Storage service call', {
+        bucket,
+        s3Prefix,
+        awsConfigured: isAwsConfigured
+      });
+
       const objects = await storageService.listS3Objects({
         bucket: bucket,
         prefix: s3Prefix,
         maxKeys: parseInt(maxKeys),
         startAfter: startAfter
+      });
+
+      logger.info('📋 Storage service response', {
+        objectsCount: objects?.length || 0,
+        objectsType: typeof objects,
+        firstObject: objects?.[0] || null
       });
 
       // Transform objects to include useful metadata
@@ -64,7 +83,7 @@ class StorageController {
       // Calculate total size
       const totalSize = transformedObjects.reduce((sum, obj) => sum + obj.size, 0);
 
-      res.json({
+      const responseData = {
         success: true,
         data: {
           objects: transformedObjects,
@@ -85,49 +104,19 @@ class StorageController {
           maxKeys: parseInt(maxKeys),
           awsConfigured: isAwsConfigured
         }
+      };
+
+      logger.info('📤 Sending storage response', {
+        totalFiles: transformedObjects.length,
+        builds: groupedObjects.builds.length,
+        deployments: groupedObjects.deployments.length,
+        hasData: transformedObjects.length > 0
       });
+
+      res.json(responseData);
 
     } catch (error) {
       logger.error('List S3 objects error:', error);
-      next(error);
-    }
-  }
-
-  /**
-   * List S3 objects for user's first tenant
-   */
-  static async listObjectsForUser(req, res, next) {
-    try {
-      const { userId } = req.user;
-
-      // Find user's first tenant
-      const tenantMembership = await prisma.tenantMember.findFirst({
-        where: { 
-          userId: userId,
-          status: 'active'
-        },
-        include: {
-          tenant: true
-        },
-        orderBy: {
-          joinedAt: 'asc'
-        }
-      });
-
-      if (!tenantMembership) {
-        return res.status(404).json({
-          error: 'No active tenant membership found',
-          message: 'User is not a member of any active tenant'
-        });
-      }
-
-      // Attach tenant to request and call listObjects
-      req.tenant = tenantMembership.tenant;
-      req.params.tenantId = tenantMembership.tenant.tenantId;
-
-      return await StorageController.listObjects(req, res, next);
-    } catch (error) {
-      logger.error('List objects for user error:', error);
       next(error);
     }
   }
@@ -704,6 +693,204 @@ class StorageController {
     } catch (error) {
       logger.error('Debug environment error:', error);
       next(error);
+    }
+  }
+
+  /**
+   * TEMPORARY: Backward compatibility for old frontend calls without tenant ID
+   * TODO: Remove once frontend is updated to use tenant-specific routes
+   */
+  static async listObjectsCompatibility(req, res, next) {
+    try {
+      const { userId } = req.user;
+      const { prefix = '', maxKeys = 100, startAfter = '' } = req.query;
+
+      // Find ALL user's active tenants, not just the first one
+      const tenantMemberships = await prisma.tenantMember.findMany({
+        where: { 
+          userId: userId,
+          status: 'active'
+        },
+        include: {
+          tenant: true
+        },
+        orderBy: {
+          joinedAt: 'asc'
+        }
+      });
+
+      if (!tenantMemberships || tenantMemberships.length === 0) {
+        // No tenant found - return empty list with same structure as main method
+        logger.info('No tenant found for user, returning empty storage list', { userId });
+        return res.json({
+          success: true,
+          data: {
+            objects: [],
+            grouped: {
+              builds: [],
+              deployments: [],
+              assets: [],
+              other: []
+            },
+            stats: {
+              totalFiles: 0,
+              totalSize: 0,
+              totalSizeFormatted: '0 B',
+              builds: 0,
+              deployments: 0,
+              assets: 0,
+              other: 0
+            }
+          },
+          meta: {
+            tenantId: null,
+            prefix: '',
+            maxKeys: 100,
+            awsConfigured: isAwsConfigured
+          },
+          message: 'No tenants available - storage list is empty'
+        });
+      }
+
+      logger.info('📁 Aggregating storage from multiple tenants', {
+        userId,
+        tenantCount: tenantMemberships.length,
+        tenantIds: tenantMemberships.map(t => t.tenant.tenantId)
+      });
+
+      // Aggregate objects from all tenants
+      let allObjects = [];
+      let totalProcessed = 0;
+      const maxKeysNum = parseInt(maxKeys);
+
+      for (const tenantMembership of tenantMemberships) {
+        if (totalProcessed >= maxKeysNum) break;
+
+        const tenantId = tenantMembership.tenant.tenantId;
+        const s3Prefix = `tenants/${tenantId}/${prefix}`;
+
+        // Determine which bucket to use based on prefix
+        const bucket = prefix && prefix.startsWith('builds/') 
+          ? process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME
+          : process.env.AWS_S3_BUCKET_STATIC || process.env.AWS_S3_BUCKET_NAME;
+
+        try {
+          const remainingKeys = maxKeysNum - totalProcessed;
+          const objects = await storageService.listS3Objects({
+            bucket: bucket,
+            prefix: s3Prefix,
+            maxKeys: Math.min(remainingKeys, 50), // Limit per tenant
+            startAfter: startAfter
+          });
+
+          logger.info('📦 Fetched objects from tenant', {
+            tenantId,
+            objectCount: objects?.length || 0,
+            bucket,
+            s3Prefix
+          });
+
+          // Transform objects to include useful metadata and tenant info
+          const transformedObjects = (objects || []).map(obj => {
+            const relativePath = obj.Key.replace(`tenants/${tenantId}/`, '');
+            let objectBucket = bucket;
+            if (relativePath.startsWith('builds/')) {
+              objectBucket = process.env.AWS_S3_BUCKET_UPLOADS || process.env.AWS_S3_BUCKET_NAME;
+            } else if (relativePath.startsWith('deployments/')) {
+              objectBucket = process.env.AWS_S3_BUCKET_STATIC || process.env.AWS_S3_BUCKET_NAME;
+            }
+
+            return {
+              key: obj.Key,
+              relativePath: relativePath,
+              size: obj.Size,
+              lastModified: obj.LastModified,
+              storageClass: obj.StorageClass,
+              etag: obj.ETag?.replace(/"/g, ''),
+              url: isAwsConfigured ? `https://${objectBucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${obj.Key}` : null,
+              tenantId: tenantId, // Add tenant info for multi-tenant aggregation
+              tenantName: tenantMembership.tenant.name
+            };
+          });
+
+          allObjects = allObjects.concat(transformedObjects);
+          totalProcessed += transformedObjects.length;
+
+        } catch (tenantError) {
+          logger.warn('Failed to fetch objects from tenant', {
+            tenantId,
+            error: tenantError.message
+          });
+          // Continue with other tenants
+        }
+      }
+
+      // Sort by lastModified descending (newest first)
+      allObjects.sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
+
+      // Group by type (builds, deployments, etc.)
+      const groupedObjects = {
+        builds: allObjects.filter(obj => obj.relativePath.startsWith('builds/')),
+        deployments: allObjects.filter(obj => obj.relativePath.startsWith('deployments/')),
+        assets: allObjects.filter(obj => obj.relativePath.startsWith('assets/')),
+        other: allObjects.filter(obj => 
+          !obj.relativePath.startsWith('builds/') && 
+          !obj.relativePath.startsWith('deployments/') && 
+          !obj.relativePath.startsWith('assets/')
+        )
+      };
+
+      // Calculate total size
+      const totalSize = allObjects.reduce((sum, obj) => sum + obj.size, 0);
+
+      const responseData = {
+        success: true,
+        data: {
+          objects: allObjects,
+          grouped: groupedObjects,
+          stats: {
+            totalFiles: allObjects.length,
+            totalSize: totalSize,
+            totalSizeFormatted: formatBytes(totalSize),
+            builds: groupedObjects.builds.length,
+            deployments: groupedObjects.deployments.length,
+            assets: groupedObjects.assets.length,
+            other: groupedObjects.other.length
+          }
+        },
+        meta: {
+          tenantIds: tenantMemberships.map(t => t.tenant.tenantId), // Multiple tenants
+          tenantCount: tenantMemberships.length,
+          prefix: prefix,
+          maxKeys: maxKeysNum,
+          awsConfigured: isAwsConfigured,
+          aggregated: true // Flag to indicate this is aggregated data
+        }
+      };
+
+      logger.info('📤 Sending aggregated storage response', {
+        totalFiles: allObjects.length,
+        builds: groupedObjects.builds.length,
+        deployments: groupedObjects.deployments.length,
+        tenantsProcessed: tenantMemberships.length,
+        hasData: allObjects.length > 0
+      });
+
+      // Add cache-busting headers to prevent 304 responses
+      res.set({
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'ETag': `"${Date.now()}-${allObjects.length}"`
+      });
+
+      res.json(responseData);
+    } catch (error) {
+      logger.error('Storage compatibility list error:', error);
+      res.status(500).json({
+        error: 'Storage list failed',
+        message: 'Failed to list storage objects'
+      });
     }
   }
 }

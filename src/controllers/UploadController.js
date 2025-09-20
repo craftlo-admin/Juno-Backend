@@ -44,62 +44,6 @@ class UploadController {
   ];
 
   /**
-   * Upload ZIP file using user's first tenant (auto-tenant detection)
-   */
-  static async uploadFileForUser(req, res, next) {
-    try {
-      const { userId } = req.user;
-
-      // Find user's first tenant
-      const tenantMembership = await prisma.tenantMember.findFirst({
-        where: { 
-          userId: userId,
-          status: 'active'
-        },
-        include: {
-          tenant: true
-        },
-        orderBy: {
-          joinedAt: 'asc' // Get the first tenant they joined
-        }
-      });
-
-      if (!tenantMembership) {
-        return res.status(404).json({
-          success: false,
-          error: 'No tenant found',
-          message: 'User is not a member of any active tenant'
-        });
-      }
-
-      // Attach tenant info to request (similar to tenantAuth middleware)
-      req.tenant = tenantMembership.tenant;
-      
-      // Validate tenant data before proceeding
-      if (!tenantMembership.tenant || !tenantMembership.tenant.tenantId) {
-        logger.error('Invalid tenant data from membership query', {
-          tenantMembership,
-          hasTenant: !!tenantMembership.tenant,
-          tenantKeys: tenantMembership.tenant ? Object.keys(tenantMembership.tenant) : 'none'
-        });
-        return res.status(500).json({
-          success: false,
-          error: 'Invalid tenant data',
-          message: 'Tenant information is incomplete'
-        });
-      }
-      
-      req.params.tenantId = tenantMembership.tenant.tenantId;
-
-      // Call the existing uploadFile method
-      return await UploadController.uploadFile(req, res, next);
-    } catch (error) {
-      logger.error('Upload file for user error:', error);
-      next(error);
-    }
-  }
-
-  /**
    * Upload ZIP file and create build job
    */
   static async uploadFile(req, res, next) {
@@ -416,6 +360,84 @@ class UploadController {
     } catch (error) {
       logger.error('Retry build error:', error);
       next(error);
+    }
+  }
+
+  /**
+   * TEMPORARY: Backward compatibility for old frontend calls without tenant ID
+   * AUTO-CREATES NEW TENANT FOR EACH ZIP UPLOAD
+   * Each upload = New tenant = New subdomain deployment
+   */
+  static async uploadFileCompatibility(req, res, next) {
+    try {
+      const { userId } = req.user;
+
+      // Import services and utilities for tenant creation
+      const tenantService = require('../services/tenantService');
+      const { generateTenantId, generateTenantDomain } = require('../utils/tenantUtils');
+
+      // Generate unique tenant name based on timestamp and file name
+      const timestamp = Date.now();
+      const fileName = req.file?.originalname?.replace('.zip', '') || 'website';
+      const sanitizedFileName = fileName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+      const tenantName = `${sanitizedFileName}-${timestamp}`;
+
+      logger.info('Creating new tenant for ZIP upload', {
+        userId,
+        fileName: req.file?.originalname,
+        tenantName
+      });
+
+      // Create new tenant automatically using transaction pattern
+      const result = await prisma.$transaction(async (tx) => {
+        // Generate unique tenant ID
+        const tenantId = await generateTenantId(tenantName);
+
+        // Create tenant and membership
+        const tenant = await tx.tenant.create({
+          data: {
+            name: tenantName,
+            description: `Auto-created for ${req.file?.originalname || 'ZIP upload'}`,
+            tenantId,
+            domain: generateTenantDomain(tenantId),
+            ownerId: userId,
+            status: 'active'
+          }
+        });
+
+        const membership = await tx.tenantMember.create({
+          data: {
+            tenantId: tenant.tenantId,
+            userId: userId,
+            role: 'owner',
+            status: 'active',
+            joinedAt: new Date()
+          }
+        });
+
+        return { tenant, membership };
+      });
+
+      // Set tenant context for the upload
+      req.params.tenantId = result.tenant.tenantId;
+      req.tenant = result.tenant;
+
+      logger.info('New tenant created for ZIP upload', {
+        userId,
+        tenantId: result.tenant.tenantId,
+        tenantName: result.tenant.name,
+        deploymentUrl: `${result.tenant.tenantId}.junotech.in`
+      });
+
+      // Call the main upload method with new tenant context
+      return await UploadController.uploadFile(req, res, next);
+    } catch (error) {
+      logger.error('Auto-tenant upload error:', error);
+      res.status(500).json({
+        error: 'Upload failed',
+        message: 'Failed to create tenant and upload build file',
+        details: error.message
+      });
     }
   }
 }

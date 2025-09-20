@@ -4,19 +4,20 @@ const { UploadController, upload } = require('../controllers/UploadController');
 const { authenticateToken } = require('../middleware/auth');
 const authorizeTenantAccess = require('../middleware/tenantAuth');
 
-// Upload ZIP file using user's first tenant (auto-tenant detection)
-router.post('/', 
-  authenticateToken, 
-  upload,
-  UploadController.uploadFileForUser
-);
-
-// Upload routes (require tenant membership)
+// Upload routes (require tenant selection)
 router.post('/:tenantId', 
   authenticateToken, 
   authorizeTenantAccess(['owner', 'admin', 'member']), 
   upload,
   UploadController.uploadFile
+);
+
+// TEMPORARY: Backward compatibility for old frontend calls
+// TODO: Remove this route once frontend is updated to use tenant-specific routes
+router.post('/', 
+  authenticateToken,
+  upload,
+  UploadController.uploadFileCompatibility
 );
 
 router.get('/:tenantId/builds', 
