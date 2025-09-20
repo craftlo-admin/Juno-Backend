@@ -38,4 +38,10 @@ router.post('/:tenantId/builds/:buildId/retry',
   UploadController.retryBuild
 );
 
+router.delete('/:tenantId/builds/:buildId', 
+  authenticateToken, 
+  authorizeTenantAccess(['owner', 'admin']), 
+  UploadController.deleteBuild
+);
+
 module.exports = router;

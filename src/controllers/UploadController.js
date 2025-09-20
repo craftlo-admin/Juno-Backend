@@ -520,6 +520,137 @@ class UploadController {
       next(error);
     }
   }
+
+  /**
+   * Delete a specific build and cleanup associated resources
+   */
+  static async deleteBuild(req, res, next) {
+    try {
+      const { tenantId, buildId } = req.params;
+      const userId = req.user.id;
+
+      logger.info('Delete build request', { tenantId, buildId, userId });
+
+      // Find the build
+      const build = await prisma.build.findFirst({
+        where: {
+          id: buildId,
+          tenantId: tenantId
+        },
+        include: {
+          deployments: true,
+          tenant: true
+        }
+      });
+
+      if (!build) {
+        return res.status(404).json({
+          error: 'Build not found',
+          message: 'The specified build does not exist or you do not have permission to delete it'
+        });
+      }
+
+      logger.info('Found build for deletion', {
+        buildId: build.id,
+        version: build.version,
+        status: build.status,
+        deploymentsCount: build.deployments.length
+      });
+
+      // Delete associated S3 files
+      const s3CleanupResults = [];
+      
+      // Delete versioned build files
+      if (build.buildPath) {
+        try {
+          const versionPath = `tenants/${tenantId}/${build.version}`;
+          await storageService.deleteS3Directory({
+            bucket: process.env.AWS_S3_BUCKET_STATIC,
+            prefix: versionPath
+          });
+          s3CleanupResults.push({ path: versionPath, status: 'deleted' });
+          logger.info(`✅ Deleted versioned build files: ${versionPath}`);
+        } catch (s3Error) {
+          logger.warn(`⚠️ Failed to delete versioned files: ${s3Error.message}`);
+          s3CleanupResults.push({ path: build.buildPath, status: 'error', error: s3Error.message });
+        }
+      }
+
+      // If this is the current deployment, also invalidate CloudFront
+      const isCurrentDeployment = build.deployments.some(d => d.status === 'active');
+      let invalidationResult = null;
+
+      if (isCurrentDeployment) {
+        try {
+          // Delete current deployment files
+          const currentPath = `tenants/${tenantId}/deployments/current`;
+          await storageService.deleteS3Directory({
+            bucket: process.env.AWS_S3_BUCKET_STATIC,
+            prefix: currentPath
+          });
+          s3CleanupResults.push({ path: currentPath, status: 'deleted' });
+          logger.info(`✅ Deleted current deployment files: ${currentPath}`);
+
+          // Invalidate CloudFront cache for shared distribution
+          const SharedTenantDistributionService = require('../services/sharedTenantDistributionService');
+          const sharedService = new SharedTenantDistributionService();
+          
+          invalidationResult = await sharedService.invalidateTenantCache(tenantId, buildId);
+          logger.info(`✅ CloudFront cache invalidated: ${invalidationResult}`);
+
+        } catch (cloudfrontError) {
+          logger.warn(`⚠️ CloudFront invalidation failed: ${cloudfrontError.message}`);
+          invalidationResult = { error: cloudfrontError.message };
+        }
+      }
+
+      // Delete database records in proper order
+      await prisma.$transaction(async (tx) => {
+        // Delete deployments first
+        await tx.deployment.deleteMany({
+          where: { buildId: buildId }
+        });
+
+        // Delete the build
+        await tx.build.delete({
+          where: { id: buildId }
+        });
+      });
+
+      logger.info('✅ Build deleted successfully', {
+        buildId,
+        tenantId,
+        version: build.version,
+        s3Cleanup: s3CleanupResults,
+        cloudfrontInvalidation: invalidationResult
+      });
+
+      res.status(200).json({
+        success: true,
+        message: 'Build deleted successfully',
+        data: {
+          buildId,
+          version: build.version,
+          tenantId,
+          s3Cleanup: s3CleanupResults,
+          cloudfrontInvalidation: invalidationResult,
+          wasCurrentDeployment: isCurrentDeployment
+        }
+      });
+
+    } catch (error) {
+      logger.error('Delete build error:', error);
+      
+      if (error.code === 'P2025') {
+        return res.status(404).json({
+          error: 'Build not found',
+          message: 'The build may have already been deleted'
+        });
+      }
+
+      next(error);
+    }
+  }
 }
 
 module.exports = {

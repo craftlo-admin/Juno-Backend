@@ -657,6 +657,44 @@ class StorageController {
                   });
                 }
                 cleanupResults.cloudfrontInvalidation.performed = true;
+              } else {
+                // Handle shared CloudFront distribution invalidation
+                logger.info(`☁️ Processing shared CloudFront distribution invalidation for tenant: ${tenantId}`);
+                
+                try {
+                  const SharedTenantDistributionService = require('../services/sharedTenantDistributionService');
+                  const sharedService = new SharedTenantDistributionService();
+                  
+                  // Invalidate tenant-specific paths on shared distribution
+                  const invalidationId = await sharedService.invalidateTenantCache(tenantId, 'tenant-deletion');
+                  
+                  logger.info(`✅ Shared CloudFront invalidation created: ${invalidationId}`);
+                  
+                  cleanupResults.cloudfrontInvalidation.details.push({
+                    distributionId: process.env.SHARED_CLOUDFRONT_DISTRIBUTION_ID,
+                    tenantId: tenantId,
+                    domain: `${tenantId}.${process.env.CUSTOM_DOMAIN_BASE || 'junotech.in'}`,
+                    invalidationId: invalidationId,
+                    action: 'shared_distribution_invalidated',
+                    status: 'success'
+                  });
+                  
+                  cleanupResults.cloudfrontInvalidation.performed = true;
+                  
+                } catch (sharedCloudfrontError) {
+                  logger.error(`❌ Shared CloudFront invalidation failed for tenant ${tenantId}:`, sharedCloudfrontError);
+                  
+                  cleanupResults.cloudfrontInvalidation.details.push({
+                    distributionId: process.env.SHARED_CLOUDFRONT_DISTRIBUTION_ID,
+                    tenantId: tenantId,
+                    action: 'shared_invalidation_failed',
+                    error: sharedCloudfrontError.message,
+                    status: 'error'
+                  });
+                  
+                  // Still mark as performed even if it failed
+                  cleanupResults.cloudfrontInvalidation.performed = true;
+                }
               }
 
               // Database cascade deletion (in proper order to handle foreign keys)
